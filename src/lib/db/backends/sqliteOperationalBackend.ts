@@ -45,10 +45,18 @@ export function classifySqlitePersistenceError(
     portableCode = "constraint_unique";
   } else if (code.includes("SQLITE_CONSTRAINT_FOREIGNKEY")) {
     portableCode = "constraint_foreign_key";
-  } else if (code === "SQLITE_BUSY" || code === "SQLITE_LOCKED") {
+  } else if (
+    code === "SQLITE_BUSY" ||
+    code.startsWith("SQLITE_BUSY_") ||
+    code === "SQLITE_LOCKED" ||
+    code.startsWith("SQLITE_LOCKED_")
+  ) {
     portableCode = "unavailable";
     retryable = true;
-  } else if (message.includes("database closed")) {
+  } else if (
+    message.includes("database closed") ||
+    message.includes("database connection is not open")
+  ) {
     portableCode = "closed";
   }
 

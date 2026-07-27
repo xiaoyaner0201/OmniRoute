@@ -43,13 +43,13 @@ export class OperationalBackend implements PersistenceBackend {
 
   initialize(): Promise<void> {
     if (this.currentState === "ready") return Promise.resolve();
-    if (this.initializePromise) return this.initializePromise;
     if (this.currentState === "closing" || this.currentState === "closed") {
       return Promise.reject(
         new PersistenceError("closed", { retryable: false, operation: "initialize" })
       );
     }
     if (this.currentState === "failed" && this.failure) return Promise.reject(this.failure);
+    if (this.initializePromise) return this.initializePromise;
 
     this.currentState = "initializing";
     this.initializePromise = this.options.hooks.initialize().then(
@@ -71,7 +71,30 @@ export class OperationalBackend implements PersistenceBackend {
 
   async readiness(): Promise<BackendReadiness> {
     if (this.currentState === "ready") {
-      const ready = await this.options.hooks.isReady();
+      let ready: boolean;
+      try {
+        ready = await this.options.hooks.isReady();
+      } catch (error: unknown) {
+        if (this.currentState !== "ready") {
+          return {
+            ready: false,
+            state: this.currentState,
+            ...(this.failure ? { reason: this.failure.code } : {}),
+          };
+        }
+        return {
+          ready: false,
+          state: "ready",
+          reason: this.classifyError(error, "readiness").code,
+        };
+      }
+      if (this.currentState !== "ready") {
+        return {
+          ready: false,
+          state: this.currentState,
+          ...(this.failure ? { reason: this.failure.code } : {}),
+        };
+      }
       return ready
         ? { ready: true, state: "ready" }
         : { ready: false, state: "ready", reason: "unavailable" };
@@ -89,16 +112,22 @@ export class OperationalBackend implements PersistenceBackend {
 
     this.currentState = "closing";
     this.closePromise = (async () => {
-      this.migrationLocks.close();
-      if (this.initializePromise) {
-        try {
-          await this.initializePromise;
-        } catch {
-          // Initialization failure is already represented by the failed state.
+      try {
+        this.migrationLocks.close();
+        if (this.initializePromise) {
+          try {
+            await this.initializePromise;
+          } catch {
+            // Initialization failure does not prevent the close hook from running.
+          }
         }
+        await this.options.hooks.close();
+        this.currentState = "closed";
+      } catch (error: unknown) {
+        this.failure = this.classifyError(error, "close");
+        this.currentState = "failed";
+        throw this.failure;
       }
-      await this.options.hooks.close();
-      this.currentState = "closed";
     })();
     return this.closePromise;
   }

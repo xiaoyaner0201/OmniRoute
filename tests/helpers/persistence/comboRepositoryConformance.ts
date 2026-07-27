@@ -5,12 +5,15 @@ import type {
   ComboRepository,
   ModelComboMappingRepository,
 } from "../../../src/domain/persistence/comboRepositories.ts";
+import type { PersistenceTransactionContext } from "../../../src/domain/persistence/transactionContext.ts";
 
 export interface ComboRepositoryHarness {
   combos: ComboRepository;
   mappings: ModelComboMappingRepository;
   reset(): Promise<void>;
   corruptComboPayload(comboId: string): Promise<void>;
+  runInTransaction?<T>(work: (context: PersistenceTransactionContext) => Promise<T>): Promise<T>;
+  observedTransactionContexts?(): readonly PersistenceTransactionContext[];
 }
 
 export interface ComboRepositoryConformanceCase {
@@ -243,5 +246,44 @@ export function registerComboRepositoryConformance(
     assert.ok(resolved);
     assert.equal(resolved.name, "selected");
     assert.equal(await harness.mappings.resolveForModel("claude-sonnet"), null);
+  });
+
+  test(`[${name}] transaction context reaches combo and mapping operations and rolls back`, async (t) => {
+    const harness = await createHarness();
+    await harness.reset();
+    if (!harness.runInTransaction || !harness.observedTransactionContexts) {
+      t.skip("backend does not expose portable async transactions");
+      return;
+    }
+
+    let transactionContext: PersistenceTransactionContext | undefined;
+    await assert.rejects(
+      harness.runInTransaction(async (context) => {
+        transactionContext = context;
+        const combo = await harness.combos.create(
+          {
+            name: "rolled-back-combo",
+            models: [{ provider: "openai", model: "gpt-4.1" }],
+          },
+          context
+        );
+        await harness.mappings.create(
+          {
+            pattern: "rolled-back-*",
+            comboId: String(combo.id),
+          },
+          context
+        );
+        throw new Error("force rollback");
+      })
+    );
+
+    assert.ok(transactionContext);
+    assert.deepEqual(harness.observedTransactionContexts(), [
+      transactionContext,
+      transactionContext,
+    ]);
+    assert.equal(await harness.combos.findByName("rolled-back-combo"), null);
+    assert.equal((await harness.mappings.list()).total, 0);
   });
 }

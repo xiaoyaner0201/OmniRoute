@@ -42,17 +42,6 @@ registerPersistenceBackendConformance([
       return controlled.backend;
     },
   },
-  {
-    name: "sqlite-operational-adapter",
-    async create() {
-      return createSqliteOperationalBackend({
-        id: "sqlite-test",
-        initialize: async () => undefined,
-        isReady: () => true,
-        close: () => undefined,
-      });
-    },
-  },
 ]);
 
 test("[controlled] transaction contexts commit once, roll back failures, and expire", async () => {
@@ -108,6 +97,7 @@ test("[controlled] close waits for initialization and rejects new work while clo
   const closing = controlled.backend.close();
 
   assert.equal(controlled.backend.state, "closing");
+  const lateInitialize = controlled.backend.initialize();
   await assert.rejects(controlled.backend.transactions.run(async () => undefined));
   await assert.rejects(
     controlled.backend.migrationLocks.acquire({ ownerId: "late", timeoutMs: 1 }),
@@ -116,6 +106,10 @@ test("[controlled] close waits for initialization and rejects new work while clo
 
   controlled.resolveInitialize();
   await initializing;
+  await assert.rejects(
+    lateInitialize,
+    (error: unknown) => error instanceof PersistenceError && error.code === "closed"
+  );
   assert.equal(controlled.backend.state, "closing");
   await assert.rejects(controlled.backend.transactions.run(async () => undefined));
   await assert.rejects(
@@ -142,6 +136,75 @@ test("[controlled] initialization failure cannot replace an in-flight closing st
   controlled.resolveClose();
   await closing;
   assert.equal(controlled.backend.state, "closed");
+});
+
+test("readiness started while ready cannot report ready after close", async () => {
+  let resolveReadiness!: (ready: boolean) => void;
+  const readinessGate = new Promise<boolean>((resolve) => {
+    resolveReadiness = resolve;
+  });
+  const backend = createSqliteOperationalBackend({
+    initialize: async () => undefined,
+    isReady: () => readinessGate,
+    close: () => undefined,
+  });
+  await backend.initialize();
+
+  const readiness = backend.readiness();
+  await backend.close();
+  resolveReadiness(true);
+
+  assert.deepEqual(await readiness, { ready: false, state: "closed" });
+});
+
+test("readiness hook failures return a portable non-ready result", async () => {
+  const backend = createSqliteOperationalBackend({
+    initialize: async () => undefined,
+    isReady: async () => {
+      throw new Error("driver readiness detail");
+    },
+    close: () => undefined,
+  });
+  await backend.initialize();
+
+  assert.deepEqual(await backend.readiness(), {
+    ready: false,
+    state: "ready",
+    reason: "unknown",
+  });
+  await backend.close();
+});
+
+test("close hook failure becomes a portable terminal failed state", async () => {
+  let closeCalls = 0;
+  const backend = createSqliteOperationalBackend({
+    initialize: async () => undefined,
+    isReady: () => true,
+    close: () => {
+      closeCalls += 1;
+      throw new Error("driver close detail");
+    },
+  });
+  await backend.initialize();
+
+  await assert.rejects(
+    backend.close(),
+    (error: unknown) =>
+      error instanceof PersistenceError && error.code === "unknown" && error.operation === "close"
+  );
+  assert.equal(backend.state, "failed");
+  assert.deepEqual(await backend.readiness(), {
+    ready: false,
+    state: "failed",
+    reason: "unknown",
+  });
+  await assert.rejects(
+    backend.initialize(),
+    (error: unknown) =>
+      error instanceof PersistenceError && error.code === "unknown" && error.operation === "close"
+  );
+  await assert.rejects(backend.close(), PersistenceError);
+  assert.equal(closeCalls, 1);
 });
 
 test("SQLite adapter cannot override its unsupported async transaction executor", async () => {

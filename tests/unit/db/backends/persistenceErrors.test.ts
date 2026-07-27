@@ -42,7 +42,24 @@ test("SQLite failures map to portable codes and retryability", () => {
       retryable: true,
     },
     {
+      raw: Object.assign(new Error("snapshot is busy"), { code: "SQLITE_BUSY_SNAPSHOT" }),
+      code: "unavailable",
+      retryable: true,
+    },
+    {
+      raw: Object.assign(new Error("shared cache is locked"), {
+        code: "SQLITE_LOCKED_SHAREDCACHE",
+      }),
+      code: "unavailable",
+      retryable: true,
+    },
+    {
       raw: new Error("Database closed"),
+      code: "closed",
+      retryable: false,
+    },
+    {
+      raw: new Error("The database connection is not open"),
       code: "closed",
       retryable: false,
     },
