@@ -15,6 +15,7 @@ import type {
   UpdateModelComboMappingInput,
 } from "@/domain/persistence/comboRepositories";
 import { globToRegex } from "@/shared/utils/globPattern";
+import { rejectUnsupportedSqliteTransactionContext } from "../backends/sqliteTransactionContext";
 import { getDbInstance } from "../core";
 
 export type { ModelComboMapping } from "@/domain/persistence/comboRepositories";
@@ -235,10 +236,28 @@ export async function resolveComboForModel(
 }
 
 export const sqliteModelComboMappingRepository: ModelComboMappingRepository = {
-  list: getModelComboMappings,
-  findById: getModelComboMappingById,
-  create: createModelComboMapping,
-  update: updateModelComboMapping,
-  deleteById: deleteModelComboMapping,
-  resolveForModel: resolveComboForModel,
+  async list(options, context) {
+    rejectUnsupportedSqliteTransactionContext(context);
+    return getModelComboMappings(options);
+  },
+  async findById(id, context) {
+    rejectUnsupportedSqliteTransactionContext(context);
+    return getModelComboMappingById(id);
+  },
+  async create(data, context) {
+    rejectUnsupportedSqliteTransactionContext(context);
+    return createModelComboMapping(data);
+  },
+  async update(id, data, context) {
+    rejectUnsupportedSqliteTransactionContext(context);
+    return updateModelComboMapping(id, data);
+  },
+  async deleteById(id, context) {
+    rejectUnsupportedSqliteTransactionContext(context);
+    return deleteModelComboMapping(id);
+  },
+  async resolveForModel(model, context) {
+    rejectUnsupportedSqliteTransactionContext(context);
+    return resolveComboForModel(model);
+  },
 };

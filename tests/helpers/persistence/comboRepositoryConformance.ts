@@ -13,10 +13,17 @@ export interface ComboRepositoryHarness {
   corruptComboPayload(comboId: string): Promise<void>;
 }
 
+export interface ComboRepositoryConformanceCase {
+  name: string;
+  createHarness(): Promise<ComboRepositoryHarness>;
+}
+
 export function registerComboRepositoryConformance(
-  createHarness: () => Promise<ComboRepositoryHarness>
+  repositoryCase: ComboRepositoryConformanceCase
 ): void {
-  test("combo repository: CRUD, defaults, lookup, count, and pagination", async () => {
+  const { name, createHarness } = repositoryCase;
+
+  test(`[${name}] combo repository: CRUD, defaults, lookup, count, and pagination`, async () => {
     const harness = await createHarness();
     await harness.reset();
 
@@ -46,7 +53,7 @@ export function registerComboRepositoryConformance(
     );
   });
 
-  test("combo repository: partial update, explicit null deletion, and missing rows", async () => {
+  test(`[${name}] combo repository: partial update, explicit null deletion, and missing rows`, async () => {
     const harness = await createHarness();
     await harness.reset();
 
@@ -76,7 +83,7 @@ export function registerComboRepositoryConformance(
     assert.equal(await harness.combos.update("missing", { strategy: "priority" }), null);
   });
 
-  test("combo repository: reorder is atomic and delete reports affected-row semantics", async () => {
+  test(`[${name}] combo repository: reorder is atomic and delete reports affected-row semantics`, async () => {
     const harness = await createHarness();
     await harness.reset();
 
@@ -121,7 +128,7 @@ export function registerComboRepositoryConformance(
     assert.deepEqual(corruptResult.combos, []);
   });
 
-  test("model mapping repository: CRUD, ordering, pagination, and atomic cascade", async () => {
+  test(`[${name}] model mapping repository: CRUD, ordering, pagination, and atomic cascade`, async () => {
     const harness = await createHarness();
     await harness.reset();
 
@@ -189,7 +196,7 @@ export function registerComboRepositoryConformance(
     assert.equal((await harness.mappings.list()).total, 0);
   });
 
-  test("model mapping repository: resolution skips disabled, inactive, and corrupt combos", async () => {
+  test(`[${name}] model mapping repository: resolution skips disabled, inactive, and corrupt combos`, async () => {
     const harness = await createHarness();
     await harness.reset();
 
