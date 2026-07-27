@@ -90,6 +90,30 @@ test("[controlled] initialization failure is classified and makes readiness fals
   });
 });
 
+test("synchronous initialization failure becomes a portable terminal failed state", async () => {
+  const backend = createSqliteOperationalBackend({
+    initialize: () => {
+      throw new Error("driver initialization detail");
+    },
+    isReady: () => false,
+    close: () => undefined,
+  });
+
+  await assert.rejects(
+    backend.initialize(),
+    (error: unknown) =>
+      error instanceof PersistenceError &&
+      error.code === "unknown" &&
+      error.operation === "initialize"
+  );
+  assert.equal(backend.state, "failed");
+  assert.deepEqual(await backend.readiness(), {
+    ready: false,
+    state: "failed",
+    reason: "unknown",
+  });
+});
+
 test("[controlled] close waits for initialization and rejects new work while closing", async () => {
   const controlled = createControlledOperationalBackend("controlled-close-race");
   controlled.pauseClose();

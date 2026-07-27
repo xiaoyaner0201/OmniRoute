@@ -52,7 +52,13 @@ export class OperationalBackend implements PersistenceBackend {
     if (this.initializePromise) return this.initializePromise;
 
     this.currentState = "initializing";
-    this.initializePromise = this.options.hooks.initialize().then(
+    let initialization: Promise<void>;
+    try {
+      initialization = this.options.hooks.initialize();
+    } catch (error: unknown) {
+      initialization = Promise.reject(error);
+    }
+    this.initializePromise = initialization.then(
       () => {
         if (this.currentState === "initializing") {
           this.currentState = "ready";
