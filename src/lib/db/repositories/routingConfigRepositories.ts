@@ -2,6 +2,8 @@ import type {
   ComboRepository,
   ModelComboMappingRepository,
 } from "@/domain/persistence/comboRepositories";
+import { sqliteOperationalBackend } from "../backends/sqliteOperationalBackend";
+import type { PersistenceBackend } from "../backends/types";
 import {
   getCombosCount as getSqliteCombosCount,
   sqliteComboRepository,
@@ -9,6 +11,7 @@ import {
 import { sqliteModelComboMappingRepository } from "./sqliteModelComboMappingRepository";
 
 export interface RoutingConfigRepositories {
+  backend: PersistenceBackend;
   combos: ComboRepository;
   modelComboMappings: ModelComboMappingRepository;
   legacySync: {
@@ -24,6 +27,7 @@ export interface RoutingConfigRepositories {
  * concrete driver when a later, separately approved backend is introduced.
  */
 export const routingConfigRepositories: RoutingConfigRepositories = {
+  backend: sqliteOperationalBackend,
   combos: sqliteComboRepository,
   modelComboMappings: sqliteModelComboMappingRepository,
   legacySync: {
