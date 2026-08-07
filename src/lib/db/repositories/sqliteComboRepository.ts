@@ -10,6 +10,7 @@ import type {
 } from "@/domain/persistence/comboRepositories";
 import { normalizeComboRecord } from "@/lib/combos/steps";
 import { validateComboInvariant } from "@/lib/combos/invariants";
+import { rejectUnsupportedSqliteTransactionContext } from "../backends/sqliteTransactionContext";
 import { getDbInstance } from "../core";
 
 type JsonRecord = Record<string, unknown>;
@@ -336,13 +337,40 @@ export async function deleteCombo(id: string) {
 }
 
 export const sqliteComboRepository: ComboRepository = {
-  list: getCombos,
-  count: async () => getCombosCount(),
-  findById: getComboById,
-  findByName: getComboByName,
-  findByNameInsensitive: getComboByNameInsensitive,
-  create: createCombo,
-  update: updateCombo,
-  reorder: reorderCombos,
-  deleteById: deleteCombo,
+  async list(limit, offset, context) {
+    rejectUnsupportedSqliteTransactionContext(context);
+    return getCombos(limit, offset);
+  },
+  async count(context) {
+    rejectUnsupportedSqliteTransactionContext(context);
+    return getCombosCount();
+  },
+  async findById(id, context) {
+    rejectUnsupportedSqliteTransactionContext(context);
+    return getComboById(id);
+  },
+  async findByName(name, context) {
+    rejectUnsupportedSqliteTransactionContext(context);
+    return getComboByName(name);
+  },
+  async findByNameInsensitive(name, context) {
+    rejectUnsupportedSqliteTransactionContext(context);
+    return getComboByNameInsensitive(name);
+  },
+  async create(data, context) {
+    rejectUnsupportedSqliteTransactionContext(context);
+    return createCombo(data);
+  },
+  async update(id, data, context) {
+    rejectUnsupportedSqliteTransactionContext(context);
+    return updateCombo(id, data);
+  },
+  async reorder(comboIds, context) {
+    rejectUnsupportedSqliteTransactionContext(context);
+    return reorderCombos(comboIds);
+  },
+  async deleteById(id, context) {
+    rejectUnsupportedSqliteTransactionContext(context);
+    return deleteCombo(id);
+  },
 };

@@ -5,18 +5,28 @@ import type {
   ComboRepository,
   ModelComboMappingRepository,
 } from "../../../src/domain/persistence/comboRepositories.ts";
+import type { PersistenceTransactionContext } from "../../../src/domain/persistence/transactionContext.ts";
 
 export interface ComboRepositoryHarness {
   combos: ComboRepository;
   mappings: ModelComboMappingRepository;
   reset(): Promise<void>;
   corruptComboPayload(comboId: string): Promise<void>;
+  runInTransaction?<T>(work: (context: PersistenceTransactionContext) => Promise<T>): Promise<T>;
+  observedTransactionContexts?(): readonly PersistenceTransactionContext[];
+}
+
+export interface ComboRepositoryConformanceCase {
+  name: string;
+  createHarness(): Promise<ComboRepositoryHarness>;
 }
 
 export function registerComboRepositoryConformance(
-  createHarness: () => Promise<ComboRepositoryHarness>
+  repositoryCase: ComboRepositoryConformanceCase
 ): void {
-  test("combo repository: CRUD, defaults, lookup, count, and pagination", async () => {
+  const { name, createHarness } = repositoryCase;
+
+  test(`[${name}] combo repository: CRUD, defaults, lookup, count, and pagination`, async () => {
     const harness = await createHarness();
     await harness.reset();
 
@@ -46,7 +56,7 @@ export function registerComboRepositoryConformance(
     );
   });
 
-  test("combo repository: partial update, explicit null deletion, and missing rows", async () => {
+  test(`[${name}] combo repository: partial update, explicit null deletion, and missing rows`, async () => {
     const harness = await createHarness();
     await harness.reset();
 
@@ -76,7 +86,7 @@ export function registerComboRepositoryConformance(
     assert.equal(await harness.combos.update("missing", { strategy: "priority" }), null);
   });
 
-  test("combo repository: reorder is atomic and delete reports affected-row semantics", async () => {
+  test(`[${name}] combo repository: reorder is atomic and delete reports affected-row semantics`, async () => {
     const harness = await createHarness();
     await harness.reset();
 
@@ -121,7 +131,7 @@ export function registerComboRepositoryConformance(
     assert.deepEqual(corruptResult.combos, []);
   });
 
-  test("model mapping repository: CRUD, ordering, pagination, and atomic cascade", async () => {
+  test(`[${name}] model mapping repository: CRUD, ordering, pagination, and atomic cascade`, async () => {
     const harness = await createHarness();
     await harness.reset();
 
@@ -189,7 +199,7 @@ export function registerComboRepositoryConformance(
     assert.equal((await harness.mappings.list()).total, 0);
   });
 
-  test("model mapping repository: resolution skips disabled, inactive, and corrupt combos", async () => {
+  test(`[${name}] model mapping repository: resolution skips disabled, inactive, and corrupt combos`, async () => {
     const harness = await createHarness();
     await harness.reset();
 
@@ -236,5 +246,44 @@ export function registerComboRepositoryConformance(
     assert.ok(resolved);
     assert.equal(resolved.name, "selected");
     assert.equal(await harness.mappings.resolveForModel("claude-sonnet"), null);
+  });
+
+  test(`[${name}] transaction context reaches combo and mapping operations and rolls back`, async (t) => {
+    const harness = await createHarness();
+    await harness.reset();
+    if (!harness.runInTransaction || !harness.observedTransactionContexts) {
+      t.skip("backend does not expose portable async transactions");
+      return;
+    }
+
+    let transactionContext: PersistenceTransactionContext | undefined;
+    await assert.rejects(
+      harness.runInTransaction(async (context) => {
+        transactionContext = context;
+        const combo = await harness.combos.create(
+          {
+            name: "rolled-back-combo",
+            models: [{ provider: "openai", model: "gpt-4.1" }],
+          },
+          context
+        );
+        await harness.mappings.create(
+          {
+            pattern: "rolled-back-*",
+            comboId: String(combo.id),
+          },
+          context
+        );
+        throw new Error("force rollback");
+      })
+    );
+
+    assert.ok(transactionContext);
+    assert.deepEqual(harness.observedTransactionContexts(), [
+      transactionContext,
+      transactionContext,
+    ]);
+    assert.equal(await harness.combos.findByName("rolled-back-combo"), null);
+    assert.equal((await harness.mappings.list()).total, 0);
   });
 }
