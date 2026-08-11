@@ -24,6 +24,7 @@ export const API_KEY_COLUMN_FALLBACKS = [
   { name: "allowed_endpoints", definition: "allowed_endpoints TEXT" },
   { name: "allowed_quotas", definition: "allowed_quotas TEXT NOT NULL DEFAULT '[]'" },
   { name: "stream_default_mode", definition: "stream_default_mode TEXT NOT NULL DEFAULT 'legacy'" },
+  { name: "cache_default_mode", definition: "cache_default_mode TEXT NOT NULL DEFAULT 'legacy'" },
   {
     name: "disable_non_public_models",
     definition: "disable_non_public_models INTEGER NOT NULL DEFAULT 0",
@@ -47,5 +48,9 @@ export const API_KEY_COLUMN_FALLBACKS = [
   {
     name: "chaos_mode_enabled",
     definition: "chaos_mode_enabled INTEGER NOT NULL DEFAULT 0",
+  },
+  {
+    name: "compression_enabled",
+    definition: "compression_enabled INTEGER NOT NULL DEFAULT 1",
   },
 ] as const;

@@ -57,6 +57,12 @@ export function parseIsActive(value: unknown): boolean {
   return true;
 }
 
+export function parseCompressionEnabled(value: unknown): boolean {
+  // DEFAULT 1 — preserve compression for legacy rows unless explicitly disabled.
+  if (value === 0 || value === "0" || value === false) return false;
+  return true;
+}
+
 export function parseAccessSchedule(value: unknown): AccessSchedule | null {
   if (!value || typeof value !== "string" || value.trim() === "") return null;
   try {
@@ -162,4 +168,8 @@ export function parseIsBanned(value: unknown): boolean {
 
 export function parseStreamDefaultMode(value: unknown): "legacy" | "json" {
   return value === "json" ? "json" : "legacy";
+}
+
+export function parseCacheDefaultMode(value: unknown): "legacy" | "bypass" {
+  return value === "bypass" ? "bypass" : "legacy";
 }
