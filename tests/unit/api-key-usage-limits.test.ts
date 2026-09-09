@@ -186,6 +186,122 @@ test("getApiKeyUsageLimitStatus cuts weekly USD spend at Shanghai Monday 00:00",
   assert.equal(status.weeklySpentUsd, 2);
 });
 
+test("unlimited windows do not require pricing for unrelated historical usage", async () => {
+  const unlimited = await apiKeysDb.createApiKey("Unlimited Key", "machine-limit-unlimited");
+  await apiKeysDb.updateApiKeyPermissions(unlimited.id, {
+    usageLimitEnabled: true,
+    dailyUsageLimitUsd: null,
+    weeklyUsageLimitUsd: null,
+  });
+  const dailyOnly = await apiKeysDb.createApiKey("Daily Only Key", "machine-limit-daily-only");
+  await apiKeysDb.updateApiKeyPermissions(dailyOnly.id, {
+    usageLimitEnabled: true,
+    dailyUsageLimitUsd: 10,
+    weeklyUsageLimitUsd: null,
+  });
+  for (const key of [unlimited, dailyOnly]) {
+    await usageHistory.saveRequestUsage({
+      provider: "unknown-provider",
+      model: "unknown-model-without-pricing",
+      apiKeyId: key.id,
+      apiKeyName: key.name,
+      tokens: { input: 1_000_000, output: 0 },
+      success: true,
+      timestamp: "2026-06-15T12:00:00.000Z",
+    });
+  }
+
+  const unlimitedMetadata = await apiKeysDb.getApiKeyMetadata(unlimited.key);
+  const dailyOnlyMetadata = await apiKeysDb.getApiKeyMetadata(dailyOnly.key);
+  assert.ok(unlimitedMetadata);
+  assert.ok(dailyOnlyMetadata);
+  const unlimitedStatus = await usageLimits.getApiKeyUsageLimitStatus(unlimitedMetadata, {
+    now: () => NOW,
+  });
+  const dailyOnlyStatus = await usageLimits.getApiKeyUsageLimitStatus(dailyOnlyMetadata, {
+    now: () => NOW,
+  });
+  assert.equal(unlimitedStatus.dailySpentUsd, 0);
+  assert.equal(unlimitedStatus.weeklySpentUsd, 0);
+  assert.equal(dailyOnlyStatus.dailySpentUsd, 0);
+  assert.equal(dailyOnlyStatus.weeklySpentUsd, 0);
+});
+
+test("quota status fails closed when successful usage has no pricing", async () => {
+  const created = await apiKeysDb.createApiKey(
+    "Unknown Pricing Key",
+    "machine-limit-unknown-pricing"
+  );
+  await apiKeysDb.updateApiKeyPermissions(created.id, {
+    usageLimitEnabled: true,
+    weeklyUsageLimitUsd: 20,
+  });
+  await usageHistory.saveRequestUsage({
+    provider: "unknown-provider",
+    model: "unknown-model-without-pricing",
+    apiKeyId: created.id,
+    apiKeyName: "Unknown Pricing Key",
+    tokens: { input: 1_000_000, output: 0 },
+    success: true,
+    timestamp: "2026-06-19T12:00:00.000Z",
+  });
+
+  const metadata = await apiKeysDb.getApiKeyMetadata(created.key);
+  assert.ok(metadata);
+  await assert.rejects(
+    usageLimits.getApiKeyUsageLimitStatus(metadata, { now: () => NOW }),
+    /api_key_usage_pricing_unavailable/
+  );
+});
+
+test("getApiKeyUsageLimitDetails returns cumulative Beijing-day waterline without future points", async () => {
+  await localDb.updatePricing({
+    claude: {
+      "claude-opus-4-8": {
+        input: 1,
+        cached: 1,
+        output: 1,
+        reasoning: 1,
+        cache_creation: 1,
+      },
+    },
+  });
+
+  const created = await apiKeysDb.createApiKey("Waterline Key", "machine-limit-waterline");
+  await apiKeysDb.updateApiKeyPermissions(created.id, {
+    usageLimitEnabled: true,
+    weeklyUsageLimitUsd: 20,
+  });
+  for (const [timestamp, input] of [
+    ["2026-06-15T02:00:00.000Z", 1_000_000],
+    ["2026-06-16T02:00:00.000Z", 2_000_000],
+    ["2026-06-18T02:00:00.000Z", 5_000_000],
+  ] as const) {
+    await usageHistory.saveRequestUsage({
+      provider: "claude",
+      model: "claude-opus-4-8",
+      apiKeyId: created.id,
+      apiKeyName: "Waterline Key",
+      tokens: { input, output: 0 },
+      success: true,
+      timestamp,
+    });
+  }
+
+  const metadata = await apiKeysDb.getApiKeyMetadata(created.key);
+  assert.ok(metadata);
+  const details = await usageLimits.getApiKeyUsageLimitDetails(metadata, {
+    now: () => Date.parse("2026-06-17T12:00:00.000Z"),
+  });
+
+  assert.equal(details.weeklySpentUsd, 3);
+  assert.deepEqual(details.weeklyDaily, [
+    { date: "2026-06-15", spentUsd: 1, cumulativeSpentUsd: 1, remainingUsd: 19 },
+    { date: "2026-06-16", spentUsd: 2, cumulativeSpentUsd: 3, remainingUsd: 17 },
+    { date: "2026-06-17", spentUsd: 0, cumulativeSpentUsd: 3, remainingUsd: 17 },
+  ]);
+});
+
 test("buildApiKeyUsageLimitText returns API-key quota spend percentage and reset lines", async () => {
   const text = usageLimits.buildApiKeyUsageLimitText(
     {

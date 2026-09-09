@@ -1,8 +1,9 @@
-import {
-  hasSelfAccountQuotaScope,
-  hasSelfUsageScope,
-} from "@/shared/constants/selfServiceScopes";
+import { hasSelfAccountQuotaScope, hasSelfUsageScope } from "@/shared/constants/selfServiceScopes";
 import { USAGE_SUPPORTED_PROVIDERS } from "@/shared/constants/providers";
+import type {
+  ApiKeyUsageLimitDetails,
+  ApiKeyUsageLimitMetadata,
+} from "@/lib/usage/apiKeyUsageLimits";
 
 type JsonRecord = Record<string, unknown>;
 type DateLike = number | string | Date | null | undefined;
@@ -12,6 +13,9 @@ interface ApiKeySelfServiceMetadata {
   name: string;
   scopes: string[];
   allowedConnections: string[];
+  usageLimitEnabled?: boolean;
+  dailyUsageLimitUsd?: number | null;
+  weeklyUsageLimitUsd?: number | null;
 }
 
 interface StatementLike {
@@ -37,6 +41,10 @@ interface CostSummaryLike {
 type GetCostSummaryFn = (apiKeyId: string) => CostSummaryLike;
 type CheckBudgetFn = (apiKeyId: string) => unknown;
 type GetDbInstanceFn = () => DbLike;
+type GetApiKeyUsageLimitDetailsFn = (
+  metadata: ApiKeyUsageLimitMetadata,
+  deps?: { now?: () => number }
+) => Promise<ApiKeyUsageLimitDetails>;
 type GetProviderConnectionByIdFn = (connectionId: string) => Promise<unknown>;
 type GetProviderConnectionsFn = (filters?: Record<string, unknown>) => Promise<unknown[]>;
 type FetchAndPersistProviderLimitsFn = (
@@ -49,6 +57,7 @@ interface ApiKeySelfServiceDeps {
   getCostSummary?: GetCostSummaryFn;
   checkBudget?: CheckBudgetFn;
   getDbInstance?: GetDbInstanceFn;
+  getApiKeyUsageLimitDetails?: GetApiKeyUsageLimitDetailsFn;
   getProviderConnectionById?: GetProviderConnectionByIdFn;
   getProviderConnections?: GetProviderConnectionsFn;
   fetchAndPersistProviderLimits?: FetchAndPersistProviderLimitsFn;
@@ -69,7 +78,7 @@ interface AccountQuotaConnection {
   lookupFailed?: boolean;
 }
 
-function toNumber(value: unknown, fallback = 0): number {
+function toNumberAllowBigInt(value: unknown, fallback = 0): number {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "bigint") return Number(value);
   if (typeof value === "string" && value.trim()) {
@@ -116,7 +125,7 @@ function getCurrentMonthWindow(now: number) {
 }
 
 function buildCostStatus(summary: CostSummaryLike, now: number) {
-  const hasBudget = !!summary.budget && toNumber(summary.activeLimitUsd) > 0;
+  const hasBudget = !!summary.budget && toNumberAllowBigInt(summary.activeLimitUsd) > 0;
   const fallbackWindow = getCurrentMonthWindow(now);
   const periodStartAt = hasBudget
     ? withDateFallback(summary.periodStartAt, fallbackWindow.periodStartAt)
@@ -125,9 +134,9 @@ function buildCostStatus(summary: CostSummaryLike, now: number) {
     ? withDateFallback(summary.nextResetAt ?? summary.budgetResetAt, fallbackWindow.resetAt)
     : fallbackWindow.resetAt;
   const usedUsd = hasBudget
-    ? roundNumber(toNumber(summary.totalCostPeriod))
-    : roundNumber(toNumber(summary.totalCostMonth));
-  const limitUsd = hasBudget ? roundNumber(toNumber(summary.activeLimitUsd)) : null;
+    ? roundNumber(toNumberAllowBigInt(summary.totalCostPeriod))
+    : roundNumber(toNumberAllowBigInt(summary.totalCostMonth));
+  const limitUsd = hasBudget ? roundNumber(toNumberAllowBigInt(summary.activeLimitUsd)) : null;
   const remainingUsd = limitUsd === null ? null : roundNumber(Math.max(limitUsd - usedUsd, 0));
   const usedPercent =
     limitUsd === null || limitUsd <= 0 ? null : roundNumber((usedUsd / limitUsd) * 100, 2);
@@ -162,11 +171,11 @@ function aggregateTokens(db: DbLike, apiKeyId: string, periodStartAt: string): T
     )
     .get(apiKeyId, periodStartAt) as JsonRecord | undefined;
 
-  const inputTokens = toNumber(row?.inputTokens);
-  const outputTokens = toNumber(row?.outputTokens);
-  const cacheReadTokens = toNumber(row?.cacheReadTokens);
-  const cacheCreationTokens = toNumber(row?.cacheCreationTokens);
-  const reasoningTokens = toNumber(row?.reasoningTokens);
+  const inputTokens = toNumberAllowBigInt(row?.inputTokens);
+  const outputTokens = toNumberAllowBigInt(row?.outputTokens);
+  const cacheReadTokens = toNumberAllowBigInt(row?.cacheReadTokens);
+  const cacheCreationTokens = toNumberAllowBigInt(row?.cacheCreationTokens);
+  const reasoningTokens = toNumberAllowBigInt(row?.reasoningTokens);
 
   return {
     inputTokens,
@@ -186,8 +195,8 @@ function unavailableAccountQuota(reason: string) {
 function quotaWindow(value: unknown) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as JsonRecord;
-  const usedPercentage = toNumber(record.usedPercentage ?? record.used, Number.NaN);
-  const remainingPercentage = toNumber(
+  const usedPercentage = toNumberAllowBigInt(record.usedPercentage ?? record.used, Number.NaN);
+  const remainingPercentage = toNumberAllowBigInt(
     record.remainingPercentage ?? record.remaining,
     Number.isFinite(usedPercentage) ? 100 - usedPercentage : Number.NaN
   );
@@ -360,6 +369,9 @@ async function normalizeDeps(deps: ApiKeySelfServiceDeps): Promise<RequiredDeps>
   const costRules =
     deps.getCostSummary && deps.checkBudget ? null : await import("@/domain/costRules");
   const dbCore = deps.getDbInstance ? null : await import("@/lib/db/core");
+  const usageLimits = deps.getApiKeyUsageLimitDetails
+    ? null
+    : await import("@/lib/usage/apiKeyUsageLimits");
   const localDb =
     deps.getProviderConnectionById && deps.getProviderConnections
       ? null
@@ -373,6 +385,8 @@ async function normalizeDeps(deps: ApiKeySelfServiceDeps): Promise<RequiredDeps>
     getCostSummary: deps.getCostSummary ?? costRules!.getCostSummary,
     checkBudget: deps.checkBudget ?? costRules!.checkBudget,
     getDbInstance: deps.getDbInstance ?? dbCore!.getDbInstance,
+    getApiKeyUsageLimitDetails:
+      deps.getApiKeyUsageLimitDetails ?? usageLimits!.getApiKeyUsageLimitDetails,
     getProviderConnectionById: deps.getProviderConnectionById ?? localDb!.getProviderConnectionById,
     getProviderConnections: deps.getProviderConnections ?? localDb!.getProviderConnections,
     fetchAndPersistProviderLimits:
@@ -393,14 +407,24 @@ export async function buildApiKeySelfServiceStatus(
   resolvedDeps.checkBudget(metadata.id);
 
   const cost = buildCostStatus(summary, resolvedDeps.now());
+  const limit = await resolvedDeps.getApiKeyUsageLimitDetails(
+    {
+      id: metadata.id,
+      allowedConnections: metadata.allowedConnections,
+      usageLimitEnabled: metadata.usageLimitEnabled,
+      dailyUsageLimitUsd: metadata.dailyUsageLimitUsd,
+      weeklyUsageLimitUsd: metadata.weeklyUsageLimitUsd,
+    },
+    { now: resolvedDeps.now }
+  );
   const tokens = aggregateTokens(
     resolvedDeps.getDbInstance() as DbLike,
     metadata.id,
-    cost.periodStartAt ?? new Date(getCurrentMonthWindow(resolvedDeps.now()).periodStartAt).toISOString()
+    cost.periodStartAt ??
+      new Date(getCurrentMonthWindow(resolvedDeps.now()).periodStartAt).toISOString()
   );
   const accountQuotas = await resolveAccountQuotas(metadata, resolvedDeps);
-  const accountQuota =
-    accountQuotas && accountQuotas.length === 1 ? accountQuotas[0] : undefined;
+  const accountQuota = accountQuotas && accountQuotas.length === 1 ? accountQuotas[0] : undefined;
 
   return {
     apiKey: {
@@ -409,6 +433,7 @@ export async function buildApiKeySelfServiceStatus(
     },
     usage: {
       cost,
+      limit,
       tokens: {
         periodStartAt: cost.periodStartAt,
         ...tokens,

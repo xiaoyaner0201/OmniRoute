@@ -1,6 +1,6 @@
 import { getDbInstance } from "@/lib/db/core";
 import { toNumber } from "@/shared/utils/numeric";
-import { calculateCost } from "./costCalculator";
+import { calculateCostWithAvailability } from "./costCalculator";
 import { buildErrorBody, sanitizeErrorMessage } from "@omniroute/open-sse/utils/error.ts";
 
 const FORTALEZA_UTC_OFFSET_MS = 3 * 60 * 60 * 1000;
@@ -31,6 +31,17 @@ export interface ApiKeyUsageLimitStatus {
   weeklyExceeded: boolean;
 }
 
+export interface ApiKeyUsageLimitDailyPoint {
+  date: string;
+  spentUsd: number;
+  cumulativeSpentUsd: number;
+  remainingUsd: number;
+}
+
+export interface ApiKeyUsageLimitDetails extends ApiKeyUsageLimitStatus {
+  weeklyDaily: ApiKeyUsageLimitDailyPoint[];
+}
+
 export interface ApiKeyUsageLimitDeps {
   now?: () => number;
 }
@@ -44,6 +55,10 @@ interface UsageCostRow {
   cacheReadTokens: number | null;
   cacheCreationTokens: number | null;
   reasoningTokens: number | null;
+}
+
+interface UsageCostByDayRow extends UsageCostRow {
+  usageDate: string | null;
 }
 
 function normalizeLimitUsd(value: unknown): number | null {
@@ -144,7 +159,11 @@ export function getShanghaiWeeklyWindow(nowMs = Date.now()): {
   };
 }
 
-async function getApiKeyUsdSpendSince(apiKeyId: string, sinceIso: string): Promise<number> {
+async function getApiKeyUsdSpendSince(
+  apiKeyId: string,
+  sinceIso: string,
+  untilIso: string
+): Promise<number> {
   if (!apiKeyId) return 0;
   const db = getDbInstance();
   const rows = db
@@ -162,11 +181,12 @@ async function getApiKeyUsdSpendSince(apiKeyId: string, sinceIso: string): Promi
       FROM usage_history
       WHERE api_key_id = @apiKeyId
         AND timestamp >= @sinceIso
+        AND timestamp < @untilIso
         AND success = 1
       GROUP BY LOWER(provider), LOWER(model), serviceTier
     `
     )
-    .all({ apiKeyId, sinceIso }) as UsageCostRow[];
+    .all({ apiKeyId, sinceIso, untilIso }) as UsageCostRow[];
 
   let total = 0;
   for (const row of rows) {
@@ -174,7 +194,7 @@ async function getApiKeyUsdSpendSince(apiKeyId: string, sinceIso: string): Promi
     const model = typeof row.model === "string" ? row.model : "";
     if (!provider || !model) continue;
 
-    total += await calculateCost(
+    const cost = await calculateCostWithAvailability(
       provider,
       model,
       {
@@ -190,9 +210,69 @@ async function getApiKeyUsdSpendSince(apiKeyId: string, sinceIso: string): Promi
         serviceTier: row.serviceTier || "standard",
       }
     );
+    if (cost === null) throw new Error("api_key_usage_pricing_unavailable");
+    total += cost;
   }
 
   return roundUsd(total);
+}
+
+async function getApiKeyUsdSpendByShanghaiDay(
+  apiKeyId: string,
+  sinceIso: string,
+  untilIso: string
+): Promise<Map<string, number>> {
+  if (!apiKeyId) return new Map();
+  const rows = getDbInstance()
+    .prepare(
+      `
+      SELECT
+        strftime('%Y-%m-%d', datetime(timestamp, '+8 hours')) as usageDate,
+        LOWER(provider) as provider,
+        LOWER(model) as model,
+        COALESCE(NULLIF(service_tier, ''), 'standard') as serviceTier,
+        COALESCE(SUM(tokens_input), 0) as promptTokens,
+        COALESCE(SUM(tokens_output), 0) as completionTokens,
+        COALESCE(SUM(tokens_cache_read), 0) as cacheReadTokens,
+        COALESCE(SUM(tokens_cache_creation), 0) as cacheCreationTokens,
+        COALESCE(SUM(tokens_reasoning), 0) as reasoningTokens
+      FROM usage_history
+      WHERE api_key_id = @apiKeyId
+        AND timestamp >= @sinceIso
+        AND timestamp < @untilIso
+        AND success = 1
+      GROUP BY usageDate, LOWER(provider), LOWER(model), serviceTier
+    `
+    )
+    .all({ apiKeyId, sinceIso, untilIso }) as UsageCostByDayRow[];
+
+  const totals = new Map<string, number>();
+  for (const row of rows) {
+    if (!row.usageDate || !/^\d{4}-\d{2}-\d{2}$/.test(row.usageDate)) continue;
+    const provider = typeof row.provider === "string" ? row.provider : "";
+    const model = typeof row.model === "string" ? row.model : "";
+    if (!provider || !model) continue;
+
+    const cost = await calculateCostWithAvailability(
+      provider,
+      model,
+      {
+        input: toNumber(row.promptTokens),
+        output: toNumber(row.completionTokens),
+        cacheRead: toNumber(row.cacheReadTokens),
+        cacheCreation: toNumber(row.cacheCreationTokens),
+        reasoning: toNumber(row.reasoningTokens),
+      },
+      {
+        provider,
+        model,
+        serviceTier: row.serviceTier || "standard",
+      }
+    );
+    if (cost === null) throw new Error("api_key_usage_pricing_unavailable");
+    totals.set(row.usageDate, (totals.get(row.usageDate) ?? 0) + cost);
+  }
+  return totals;
 }
 
 export async function getApiKeyUsageLimitStatus(
@@ -208,10 +288,15 @@ export async function getApiKeyUsageLimitStatus(
   const dailyLimitUsd = normalizeLimitUsd(metadata.dailyUsageLimitUsd);
   const weeklyLimitUsd = normalizeLimitUsd(metadata.weeklyUsageLimitUsd);
   const enabled = metadata.usageLimitEnabled === true;
+  const untilIso = new Date(now + 1).toISOString();
 
   const [dailySpentUsd, weeklySpentUsd] = await Promise.all([
-    getApiKeyUsdSpendSince(metadata.id, dailyWindowStartIso),
-    getApiKeyUsdSpendSince(metadata.id, weeklyWindowStartIso),
+    enabled && dailyLimitUsd !== null
+      ? getApiKeyUsdSpendSince(metadata.id, dailyWindowStartIso, untilIso)
+      : Promise.resolve(0),
+    enabled && weeklyLimitUsd !== null
+      ? getApiKeyUsdSpendSince(metadata.id, weeklyWindowStartIso, untilIso)
+      : Promise.resolve(0),
   ]);
 
   return {
@@ -227,6 +312,42 @@ export async function getApiKeyUsageLimitStatus(
     dailyExceeded: enabled && dailyLimitUsd !== null && dailySpentUsd >= dailyLimitUsd,
     weeklyExceeded: enabled && weeklyLimitUsd !== null && weeklySpentUsd >= weeklyLimitUsd,
   };
+}
+
+export async function getApiKeyUsageLimitDetails(
+  metadata: ApiKeyUsageLimitMetadata,
+  deps: ApiKeyUsageLimitDeps = {}
+): Promise<ApiKeyUsageLimitDetails> {
+  const now = deps.now?.() ?? Date.now();
+  const status = await getApiKeyUsageLimitStatus(metadata, { now: () => now });
+  if (!status.enabled || status.weeklyLimitUsd === null) {
+    return { ...status, weeklyDaily: [] };
+  }
+
+  const spendByDate = await getApiKeyUsdSpendByShanghaiDay(
+    metadata.id,
+    status.weeklyWindowStartIso,
+    new Date(now + 1).toISOString()
+  );
+  const startMs = Date.parse(status.weeklyWindowStartIso);
+  const resetMs = Date.parse(status.weeklyResetAtIso ?? "");
+  const lastPointMs = Math.min(now, resetMs - 1);
+  let cumulative = 0;
+  const weeklyDaily: ApiKeyUsageLimitDailyPoint[] = [];
+
+  for (let pointMs = startMs; pointMs <= lastPointMs; pointMs += DAY_MS) {
+    const date = new Date(pointMs + SHANGHAI_UTC_OFFSET_MS).toISOString().slice(0, 10);
+    const spent = spendByDate.get(date) ?? 0;
+    cumulative += spent;
+    weeklyDaily.push({
+      date,
+      spentUsd: roundUsd(spent),
+      cumulativeSpentUsd: roundUsd(cumulative),
+      remainingUsd: roundUsd(Math.max(status.weeklyLimitUsd - cumulative, 0)),
+    });
+  }
+
+  return { ...status, weeklyDaily };
 }
 
 export function buildApiKeyUsageLimitText(

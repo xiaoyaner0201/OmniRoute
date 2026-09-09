@@ -8,6 +8,7 @@
  */
 
 import { isFlatRateProvider } from "./flatRateProviders";
+import { toNumber } from "@/shared/utils/numeric";
 
 /**
  * Normalize model name — strip provider path prefixes.
@@ -63,15 +64,6 @@ function extractExactCostUsd(
     return ticks / USD_TICKS_PER_DOLLAR;
   }
   return null;
-}
-
-function toNumber(value: unknown, fallback = 0): number {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && value.trim().length > 0) {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : fallback;
-  }
-  return fallback;
 }
 
 function normalizeServiceTier(value: unknown): string {
@@ -173,13 +165,13 @@ export function computeCostFromPricing(
   return cost * getCodexFastCostMultiplier(options.provider, options.model, options.serviceTier);
 }
 
-export async function calculateCost(
+export async function calculateCostWithAvailability(
   provider: string,
   model: string,
   tokens: Record<string, number | undefined> | null | undefined,
   options: CostCalculationOptions = {}
-): Promise<number> {
-  if (!tokens || !provider || !model) return 0;
+): Promise<number | null> {
+  if (!tokens || !provider || !model) return null;
 
   // Short-circuit before any pricing DB lookup when an exact, provider-reported
   // cost is present (currently xAI's `cost_in_usd_ticks` — see extractExactCostUsd).
@@ -204,7 +196,7 @@ export async function calculateCost(
         }
       }
     }
-    if (!pricing) return 0;
+    if (!pricing) return null;
 
     const pricingRecord =
       pricing && typeof pricing === "object" && !Array.isArray(pricing)
@@ -217,8 +209,17 @@ export async function calculateCost(
     });
   } catch (error) {
     console.error("Error calculating cost:", error);
-    return 0;
+    return null;
   }
+}
+
+export async function calculateCost(
+  provider: string,
+  model: string,
+  tokens: Record<string, number | undefined> | null | undefined,
+  options: CostCalculationOptions = {}
+): Promise<number> {
+  return (await calculateCostWithAvailability(provider, model, tokens, options)) ?? 0;
 }
 
 type ModalPricing = Record<string, unknown>;

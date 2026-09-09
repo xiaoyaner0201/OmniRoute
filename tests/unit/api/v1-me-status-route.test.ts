@@ -23,5 +23,8 @@ test("GET /api/v1/me/status derives identity from Bearer metadata and ignores qu
   assert.match(source, /validateApiKey/);
   assert.match(source, /getApiKeyMetadata/);
   assert.match(source, /metadata\.id === "env-key"/);
+  assert.match(source, /usageLimitEnabled: metadata\.usageLimitEnabled/);
+  assert.match(source, /dailyUsageLimitUsd: metadata\.dailyUsageLimitUsd/);
+  assert.match(source, /weeklyUsageLimitUsd: metadata\.weeklyUsageLimitUsd/);
   assert.doesNotMatch(source, /searchParams\.get\(["']apiKeyId["']\)/);
 });

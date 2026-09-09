@@ -15,7 +15,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import DatabaseSync from "better-sqlite3";
 
-import { SELF_ACCOUNT_QUOTA_SCOPE, SELF_USAGE_SCOPE } from "../../src/shared/constants/selfServiceScopes.ts";
+import {
+  SELF_ACCOUNT_QUOTA_SCOPE,
+  SELF_USAGE_SCOPE,
+} from "../../src/shared/constants/selfServiceScopes.ts";
 import { buildApiKeySelfServiceStatus } from "../../src/lib/usage/apiKeySelfService.ts";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -57,10 +60,7 @@ test("self-service scope migration backfills own usage once and preserves explic
   assert.deepEqual(scopesById.get("legacy-empty"), [SELF_USAGE_SCOPE]);
   assert.deepEqual(scopesById.get("legacy-null"), [SELF_USAGE_SCOPE]);
   assert.deepEqual(scopesById.get("custom"), ["custom:scope", SELF_USAGE_SCOPE]);
-  assert.deepEqual(scopesById.get("quota-opt-in"), [
-    SELF_ACCOUNT_QUOTA_SCOPE,
-    SELF_USAGE_SCOPE,
-  ]);
+  assert.deepEqual(scopesById.get("quota-opt-in"), [SELF_ACCOUNT_QUOTA_SCOPE, SELF_USAGE_SCOPE]);
   assert.deepEqual(scopesById.get("already-disabled-after-migration"), ["custom:scope"]);
 });
 
@@ -100,6 +100,20 @@ function makeDeps(overrides: Record<string, unknown> = {}) {
           },
         }),
       }),
+      getApiKeyUsageLimitDetails: async () => ({
+        enabled: false,
+        dailyLimitUsd: null,
+        weeklyLimitUsd: null,
+        dailySpentUsd: 0,
+        weeklySpentUsd: 0,
+        dailyWindowStartIso: "2026-05-29T03:00:00.000Z",
+        dailyResetAtIso: "2026-05-30T03:00:00.000Z",
+        weeklyWindowStartIso: "2026-05-24T16:00:00.000Z",
+        weeklyResetAtIso: "2026-05-31T16:00:00.000Z",
+        dailyExceeded: false,
+        weeklyExceeded: false,
+        weeklyDaily: [],
+      }),
       getProviderConnectionById: async () => null,
       getProviderConnections: async () => [],
       fetchAndPersistProviderLimits: async () => {
@@ -131,6 +145,58 @@ test("self-service status reports own cost and token usage with null budget fiel
   assert.equal(dbParams[0][0], "key-a");
   assert.equal(dbParams[0][1], "2026-05-01T00:00:00.000Z");
   assert.equal("accountQuota" in status, false);
+});
+
+test("self-service status exposes the caller's enforced API-key weekly waterline", async () => {
+  const metadata = {
+    id: "key-limited",
+    name: "limited",
+    scopes: [SELF_USAGE_SCOPE],
+    allowedConnections: [],
+    usageLimitEnabled: true,
+    dailyUsageLimitUsd: null,
+    weeklyUsageLimitUsd: 50,
+  };
+  const seen: unknown[] = [];
+  const { deps } = makeDeps({
+    getApiKeyUsageLimitDetails: async (value: unknown, valueDeps: unknown) => {
+      seen.push(value, valueDeps);
+      return {
+        enabled: true,
+        dailyLimitUsd: null,
+        weeklyLimitUsd: 50,
+        dailySpentUsd: 0,
+        weeklySpentUsd: 12.5,
+        dailyWindowStartIso: "2026-05-29T03:00:00.000Z",
+        dailyResetAtIso: "2026-05-30T03:00:00.000Z",
+        weeklyWindowStartIso: "2026-05-24T16:00:00.000Z",
+        weeklyResetAtIso: "2026-05-31T16:00:00.000Z",
+        dailyExceeded: false,
+        weeklyExceeded: false,
+        weeklyDaily: [
+          {
+            date: "2026-05-25",
+            spentUsd: 12.5,
+            cumulativeSpentUsd: 12.5,
+            remainingUsd: 37.5,
+          },
+        ],
+      };
+    },
+  });
+
+  const status = await buildApiKeySelfServiceStatus(metadata, deps);
+
+  assert.equal(seen.length, 2);
+  assert.deepEqual(seen[0], {
+    id: "key-limited",
+    allowedConnections: [],
+    usageLimitEnabled: true,
+    dailyUsageLimitUsd: null,
+    weeklyUsageLimitUsd: 50,
+  });
+  assert.equal(status.usage.limit.weeklySpentUsd, 12.5);
+  assert.equal(status.usage.limit.weeklyDaily[0].remainingUsd, 37.5);
 });
 
 test("self-service status reports USD budget percentage using the budget period", async () => {
@@ -231,7 +297,11 @@ test("self-service status reports all explicitly allowed provider account quotas
         usage: {
           plan: "Claude Max",
           quotas: {
-            daily: { usedPercentage: 35, remainingPercentage: 65, resetAt: "2026-05-30T00:00:00.000Z" },
+            daily: {
+              usedPercentage: 35,
+              remainingPercentage: 65,
+              resetAt: "2026-05-30T00:00:00.000Z",
+            },
           },
         },
         cache: { quotas: null, plan: null, message: null, fetchedAt: "" },
@@ -268,7 +338,10 @@ test("self-service status reports all active provider account quotas for unrestr
       { id: "conn-disabled", provider: "claude", isActive: false },
     ],
     fetchAndPersistProviderLimits: async (connectionId: string) => ({
-      connection: { id: connectionId, provider: connectionId === "conn-codex" ? "codex" : "cursor" },
+      connection: {
+        id: connectionId,
+        provider: connectionId === "conn-codex" ? "codex" : "cursor",
+      },
       usage: {
         plan: connectionId === "conn-codex" ? "ChatGPT Plus" : "Cursor Pro",
         quotas: {
