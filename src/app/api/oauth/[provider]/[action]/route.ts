@@ -37,7 +37,7 @@ import {
   oauthPollSchema,
 } from "@/shared/validation/schemas";
 import { isValidationFailure, validateBody } from "@/shared/validation/helpers";
-import { isAuthRequired, isAuthenticated } from "@/shared/utils/apiAuth";
+import { requireManagementAuth } from "@/lib/api/requireManagementAuth";
 import { sanitizeErrorMessage } from "@omniroute/open-sse/utils/error";
 import { GITLAB_DUO_OAUTH_SETUP_MESSAGE } from "@/shared/constants/gitlabDuoSetupMessage";
 import { keychainImportOnlyGuard } from "./keychainImportOnly";
@@ -105,10 +105,24 @@ function resolvePublicBaseUrl(request: Request): string {
   return new URL(request.url).origin;
 }
 
+/**
+ * `/api/oauth/` is PUBLIC-classified, so the central authz pipeline does not
+ * authenticate this route — the gate lives here. It previously called
+ * `isAuthenticated()`, which for a PUBLIC path accepts ANY valid inference API
+ * key and does not understand scoped CLI access tokens at all. That is the same
+ * defect class already fixed on the per-provider import routes
+ * (GHSA-mg76-rhpx-gvw3 / GHSA-gxv4-955v-v6cm): these actions mint and persist
+ * provider credentials and must require management authority.
+ *
+ * Delegating to the shared `requireManagementAuth` keeps one definition of that
+ * authority for every management surface (no drift): dashboard session, the
+ * loopback CLI machine token, a scoped `oma_` access token — which
+ * `inferRequiredScope` requires to be `admin` on `/api/oauth`, so `read`/`write`
+ * tokens still get 403 — or a `manage`-scope API key. Unknown, revoked and
+ * expired credentials, and credentials carried in the URL, remain rejected.
+ */
 async function requireOAuthRouteAuth(request: Request) {
-  if (!(await isAuthRequired(request))) return null;
-  if (await isAuthenticated(request)) return null;
-  return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  return requireManagementAuth(request);
 }
 
 /**
