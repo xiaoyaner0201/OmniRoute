@@ -8,6 +8,7 @@
  */
 
 import { isFlatRateProvider } from "./flatRateProviders";
+import { getPromptCacheCreationTokens, getPromptCacheReadTokens } from "./tokenAccounting";
 import { toNumber } from "@/shared/utils/numeric";
 
 /**
@@ -139,9 +140,13 @@ export function computeCostFromPricing(
 
   let cost = 0;
   const inputTokens = tokens.input ?? tokens.prompt_tokens ?? tokens.input_tokens ?? 0;
-  const cachedTokens =
-    tokens.cacheRead ?? tokens.cached_tokens ?? tokens.cache_read_input_tokens ?? 0;
-  const cacheCreationTokens = tokens.cacheCreation ?? tokens.cache_creation_input_tokens ?? 0;
+  // Cache counters may be top-level (Anthropic, pre-flattened internal shapes) or
+  // nested under prompt_tokens_details / input_tokens_details (OpenAI
+  // chat/completions and Responses). Reuse the shared accessors so every caller
+  // discounts cache hits identically — reading only top-level keys silently
+  // billed nested cache reads at the full input rate.
+  const cachedTokens = getPromptCacheReadTokens(tokens);
+  const cacheCreationTokens = getPromptCacheCreationTokens(tokens);
 
   // prompt_tokens from extractors already includes cache_read + cache_creation,
   // so we must subtract BOTH cache types to avoid pricing cache at the full
