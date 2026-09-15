@@ -109,7 +109,14 @@ async function pollDeviceCodeOnce(
     if (data.success) return { status: "success" };
     if (data.error === "slow_down") return { status: "slow_down" };
     if (data.error && !data.pending) {
-      return { status: "error", message: String(data.errorDescription || data.error) };
+      // The error field is an object (`{message,type}`) on routes behind the shared
+      // management guard and a bare string on the older OAuth error paths; feeding
+      // the object straight to String() renders "[object Object]" to the user.
+      const described =
+        typeof data.errorDescription === "string" && data.errorDescription.trim()
+          ? data.errorDescription
+          : getErrorMessage(data, res.status);
+      return { status: "error", message: described };
     }
     return { status: "pending" };
   } catch (error) {
@@ -517,7 +524,15 @@ export default function OAuthModal({
                 }
 
                 if (pollData.error && !pollData.pending) {
-                  throw new Error(pollData.errorDescription || pollData.error);
+                  // Same object-vs-string error shape as the device-code poll above:
+                  // routes on the shared management guard return `{message,type}`,
+                  // which throws "[object Object]" at the user without this.
+                  throw new Error(
+                    typeof pollData.errorDescription === "string" &&
+                    pollData.errorDescription.trim()
+                      ? pollData.errorDescription
+                      : getErrorMessage(pollData, pollRes.status)
+                  );
                 }
               }
 

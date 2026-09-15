@@ -134,3 +134,68 @@ test("permanently retired and keychain-only providers answer before the auth gat
   );
   assert.equal(keychainOnly.status, 400, "keychain-import-only provider stays 400");
 });
+
+/**
+ * `authorize`/`exchange` above are not the only actions that mint or persist
+ * credentials: `import-token` and `device-complete` write a connection outright,
+ * `public-link` issues a single-use public ticket, and `poll` returns the result
+ * of an in-flight authorization. An anonymous caller must not reach any of them.
+ */
+test("every credential-bearing action refuses anonymous callers", async () => {
+  const post = (action: string, body: Record<string, unknown>) =>
+    route.POST(
+      new Request(`http://localhost/api/oauth/codex/${action}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }) as unknown as NextRequest,
+      { params: Promise.resolve({ provider: "codex", action }) }
+    );
+
+  for (const [action, body] of [
+    ["import-token", { accessToken: "imported", refreshToken: "imported-refresh" }],
+    ["device-complete", { deviceCode: "device-code" }],
+    ["public-link", { redirectUri: REDIRECT }],
+    ["poll", { deviceCode: "device-code" }],
+  ] as const) {
+    assert.equal((await post(action, body)).status, 401, `${action} refuses anonymous callers`);
+  }
+});
+
+/**
+ * The route is PUBLIC-classified, so the authz pipeline strips the CLI token
+ * header before a handler ever runs and stamps `auth-kind: anonymous`. The
+ * loopback CLI machine token therefore does NOT authenticate this route — true
+ * of the old guard too, so it is not a regression, but it must stay pinned so
+ * nobody documents local CLI OAuth as working.
+ */
+test("a post-pipeline anonymous stamp is refused even from loopback", async () => {
+  const response = await route.GET(
+    new Request(
+      `http://localhost/api/oauth/codex/authorize?redirect_uri=${encodeURIComponent(REDIRECT)}`,
+      {
+        headers: {
+          "x-omniroute-auth-kind": "anonymous",
+          "x-forwarded-for": "127.0.0.1",
+        },
+      }
+    ) as unknown as NextRequest,
+    { params: Promise.resolve({ provider: "codex", action: "authorize" }) }
+  );
+  assert.equal(response.status, 401, "anonymous stamp from loopback is still rejected");
+});
+
+/**
+ * The shared guard answers with a structured envelope, not the bare
+ * `{"error":"Unauthorized"}` string the old guard produced. The dashboard modal
+ * and CLI both parse this shape; pin it so a future change cannot silently
+ * regress them to rendering "[object Object]".
+ */
+test("rejections carry a structured error envelope", async () => {
+  const response = await authorize();
+  assert.equal(response.status, 401);
+  const body = (await response.json()) as { error?: { message?: string; type?: string } };
+  assert.equal(typeof body.error, "object", "error is an object, not a bare string");
+  assert.equal(typeof body.error?.message, "string", "error.message is a string");
+  assert.ok((body.error?.message ?? "").trim().length > 0, "error.message is non-empty");
+});

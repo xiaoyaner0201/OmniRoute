@@ -303,8 +303,22 @@ test("OAuth routes that can create provider connections require auth guard", () 
   for (const relPath of targets) {
     const content = readIfExists(relPath);
     assert.ok(content, `${relPath} should exist`);
-    assert.ok(content.includes("isAuthRequired"), `${relPath} should check whether auth is active`);
-    assert.ok(content.includes("isAuthenticated"), `${relPath} should require authenticated users`);
-    assert.ok(content.includes("Unauthorized"), `${relPath} should reject anonymous requests`);
+
+    // Two accepted spellings of the same guarantee. `requireManagementAuth` is the
+    // shared management gate every one of these surfaces is migrating onto; the
+    // legacy trio is the hand-rolled equivalent still in place on the routes that
+    // have not been migrated yet. Asserting only the legacy spelling made this test
+    // fail on already-correct code the moment a route adopted the shared helper.
+    const usesSharedGuard = content.includes("requireManagementAuth(");
+    const usesLegacyGuard =
+      content.includes("isAuthRequired") &&
+      content.includes("isAuthenticated") &&
+      content.includes("Unauthorized");
+
+    assert.ok(
+      usesSharedGuard || usesLegacyGuard,
+      `${relPath} should gate anonymous callers with requireManagementAuth() or the ` +
+        `isAuthRequired/isAuthenticated/Unauthorized guard`
+    );
   }
 });
