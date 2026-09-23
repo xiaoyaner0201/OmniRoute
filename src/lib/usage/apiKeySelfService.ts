@@ -1,4 +1,8 @@
 import { hasSelfAccountQuotaScope, hasSelfUsageScope } from "@/shared/constants/selfServiceScopes";
+import type {
+  ApiKeyUsageLimitDetails,
+  ApiKeyUsageLimitMetadata,
+} from "@/lib/usage/apiKeyUsageLimits";
 import { supportsProviderQuota } from "@/shared/utils/providerQuotaVisibility";
 
 type JsonRecord = Record<string, unknown>;
@@ -9,6 +13,9 @@ interface ApiKeySelfServiceMetadata {
   name: string;
   scopes: string[];
   allowedConnections: string[];
+  usageLimitEnabled?: boolean;
+  dailyUsageLimitUsd?: number | null;
+  weeklyUsageLimitUsd?: number | null;
 }
 
 interface StatementLike {
@@ -34,6 +41,10 @@ interface CostSummaryLike {
 type GetCostSummaryFn = (apiKeyId: string) => CostSummaryLike;
 type CheckBudgetFn = (apiKeyId: string) => unknown;
 type GetDbInstanceFn = () => DbLike;
+type GetApiKeyUsageLimitDetailsFn = (
+  metadata: ApiKeyUsageLimitMetadata,
+  deps?: { now?: () => number }
+) => Promise<ApiKeyUsageLimitDetails>;
 type GetProviderConnectionByIdFn = (connectionId: string) => Promise<unknown>;
 type GetProviderConnectionsFn = (filters?: Record<string, unknown>) => Promise<unknown[]>;
 type FetchAndPersistProviderLimitsFn = (
@@ -46,6 +57,7 @@ interface ApiKeySelfServiceDeps {
   getCostSummary?: GetCostSummaryFn;
   checkBudget?: CheckBudgetFn;
   getDbInstance?: GetDbInstanceFn;
+  getApiKeyUsageLimitDetails?: GetApiKeyUsageLimitDetailsFn;
   getProviderConnectionById?: GetProviderConnectionByIdFn;
   getProviderConnections?: GetProviderConnectionsFn;
   fetchAndPersistProviderLimits?: FetchAndPersistProviderLimitsFn;
@@ -365,6 +377,9 @@ async function normalizeDeps(deps: ApiKeySelfServiceDeps): Promise<RequiredDeps>
   const costRules =
     deps.getCostSummary && deps.checkBudget ? null : await import("@/domain/costRules");
   const dbCore = deps.getDbInstance ? null : await import("@/lib/db/core");
+  const usageLimits = deps.getApiKeyUsageLimitDetails
+    ? null
+    : await import("@/lib/usage/apiKeyUsageLimits");
   const localDb =
     deps.getProviderConnectionById && deps.getProviderConnections
       ? null
@@ -378,6 +393,8 @@ async function normalizeDeps(deps: ApiKeySelfServiceDeps): Promise<RequiredDeps>
     getCostSummary: deps.getCostSummary ?? costRules!.getCostSummary,
     checkBudget: deps.checkBudget ?? costRules!.checkBudget,
     getDbInstance: deps.getDbInstance ?? dbCore!.getDbInstance,
+    getApiKeyUsageLimitDetails:
+      deps.getApiKeyUsageLimitDetails ?? usageLimits!.getApiKeyUsageLimitDetails,
     getProviderConnectionById: deps.getProviderConnectionById ?? localDb!.getProviderConnectionById,
     getProviderConnections: deps.getProviderConnections ?? localDb!.getProviderConnections,
     fetchAndPersistProviderLimits:
@@ -398,6 +415,16 @@ export async function buildApiKeySelfServiceStatus(
   resolvedDeps.checkBudget(metadata.id);
 
   const cost = buildCostStatus(summary, resolvedDeps.now());
+  const limit = await resolvedDeps.getApiKeyUsageLimitDetails(
+    {
+      id: metadata.id,
+      allowedConnections: metadata.allowedConnections,
+      usageLimitEnabled: metadata.usageLimitEnabled,
+      dailyUsageLimitUsd: metadata.dailyUsageLimitUsd,
+      weeklyUsageLimitUsd: metadata.weeklyUsageLimitUsd,
+    },
+    { now: resolvedDeps.now }
+  );
   const tokens = aggregateTokens(
     resolvedDeps.getDbInstance() as DbLike,
     metadata.id,
@@ -414,6 +441,7 @@ export async function buildApiKeySelfServiceStatus(
     },
     usage: {
       cost,
+      limit,
       tokens: {
         periodStartAt: cost.periodStartAt,
         ...tokens,

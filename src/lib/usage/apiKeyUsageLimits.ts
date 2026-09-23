@@ -5,6 +5,7 @@ import { calculateCostDetailed } from "./costCalculator";
 import { buildErrorBody, sanitizeErrorMessage } from "@omniroute/open-sse/utils/error.ts";
 
 const FORTALEZA_UTC_OFFSET_MS = 3 * 60 * 60 * 1000;
+const SHANGHAI_UTC_OFFSET_MS = 8 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -40,6 +41,17 @@ export interface ApiKeyUsageLimitStatus {
   weeklyHasUnpricedUsage?: boolean;
 }
 
+export interface ApiKeyUsageLimitDailyPoint {
+  date: string;
+  spentUsd: number;
+  cumulativeSpentUsd: number;
+  remainingUsd: number;
+}
+
+export interface ApiKeyUsageLimitDetails extends ApiKeyUsageLimitStatus {
+  weeklyDaily: ApiKeyUsageLimitDailyPoint[];
+}
+
 export interface ApiKeyUsageLimitDeps {
   now?: () => number;
   getProviderConnectionById?: (connectionId: string) => Promise<unknown>;
@@ -57,6 +69,10 @@ interface UsageCostRow {
   cacheReadTokens: number | null;
   cacheCreationTokens: number | null;
   reasoningTokens: number | null;
+}
+
+interface UsageCostByDayRow extends UsageCostRow {
+  usageDate: string | null;
 }
 
 interface WeeklyResetCandidate {
@@ -504,6 +520,99 @@ export async function getApiKeyUsageLimitStatus(
     dailyHasUnpricedUsage: dailySpend.hasUnpricedUsage,
     weeklyHasUnpricedUsage: weeklySpend.hasUnpricedUsage,
   };
+}
+
+async function getApiKeyUsdSpendByShanghaiDay(
+  apiKeyId: string,
+  sinceIso: string,
+  untilIso: string
+): Promise<Map<string, number>> {
+  if (!apiKeyId) return new Map();
+  const rows = getDbInstance()
+    .prepare(
+      `
+      SELECT
+        strftime('%Y-%m-%d', datetime(timestamp, '+8 hours')) as usageDate,
+        LOWER(provider) as provider,
+        LOWER(model) as model,
+        COALESCE(NULLIF(service_tier, ''), 'standard') as serviceTier,
+        COALESCE(SUM(tokens_input), 0) as promptTokens,
+        COALESCE(SUM(tokens_output), 0) as completionTokens,
+        COALESCE(SUM(tokens_cache_read), 0) as cacheReadTokens,
+        COALESCE(SUM(tokens_cache_creation), 0) as cacheCreationTokens,
+        COALESCE(SUM(tokens_reasoning), 0) as reasoningTokens
+      FROM usage_history
+      WHERE api_key_id = @apiKeyId
+        AND timestamp >= @sinceIso
+        AND timestamp < @untilIso
+        AND success = 1
+      GROUP BY usageDate, LOWER(provider), LOWER(model), serviceTier
+    `
+    )
+    .all({ apiKeyId, sinceIso, untilIso }) as UsageCostByDayRow[];
+
+  const totals = new Map<string, number>();
+  for (const row of rows) {
+    if (!row.usageDate || !/^\d{4}-\d{2}-\d{2}$/.test(row.usageDate)) continue;
+    const provider = typeof row.provider === "string" ? row.provider : "";
+    const model = typeof row.model === "string" ? row.model : "";
+    if (!provider || !model) continue;
+
+    const { costUsd } = await calculateCostDetailed(
+      provider,
+      model,
+      {
+        input: toNumber(row.promptTokens),
+        output: toNumber(row.completionTokens),
+        cacheRead: toNumber(row.cacheReadTokens),
+        cacheCreation: toNumber(row.cacheCreationTokens),
+        reasoning: toNumber(row.reasoningTokens),
+      },
+      {
+        provider,
+        model,
+        serviceTier: row.serviceTier || "standard",
+      }
+    );
+    totals.set(row.usageDate, (totals.get(row.usageDate) ?? 0) + costUsd);
+  }
+  return totals;
+}
+
+export async function getApiKeyUsageLimitDetails(
+  metadata: ApiKeyUsageLimitMetadata,
+  deps: ApiKeyUsageLimitDeps = {}
+): Promise<ApiKeyUsageLimitDetails> {
+  const now = deps.now?.() ?? Date.now();
+  const status = await getApiKeyUsageLimitStatus(metadata, { ...deps, now: () => now });
+  if (!status.enabled || status.weeklyLimitUsd === null) {
+    return { ...status, weeklyDaily: [] };
+  }
+
+  const spendByDate = await getApiKeyUsdSpendByShanghaiDay(
+    metadata.id,
+    status.weeklyWindowStartIso,
+    new Date(now + 1).toISOString()
+  );
+  const startMs = Date.parse(status.weeklyWindowStartIso);
+  const resetMs = Date.parse(status.weeklyResetAtIso ?? "");
+  const lastPointMs = Number.isFinite(resetMs) ? Math.min(now, resetMs - 1) : now;
+  let cumulative = 0;
+  const weeklyDaily: ApiKeyUsageLimitDailyPoint[] = [];
+
+  for (let pointMs = startMs; pointMs <= lastPointMs; pointMs += DAY_MS) {
+    const date = new Date(pointMs + SHANGHAI_UTC_OFFSET_MS).toISOString().slice(0, 10);
+    const spent = spendByDate.get(date) ?? 0;
+    cumulative += spent;
+    weeklyDaily.push({
+      date,
+      spentUsd: roundUsd(spent),
+      cumulativeSpentUsd: roundUsd(cumulative),
+      remainingUsd: roundUsd(Math.max(status.weeklyLimitUsd - cumulative, 0)),
+    });
+  }
+
+  return { ...status, weeklyDaily };
 }
 
 export function buildApiKeyUsageLimitText(
