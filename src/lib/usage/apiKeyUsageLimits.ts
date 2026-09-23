@@ -1,6 +1,4 @@
 import { getDbInstance } from "@/lib/db/core";
-import type { ProviderLimitsCacheEntry } from "@/lib/db/providerLimits";
-import { getProviderQuotaWindowStartIso } from "@/lib/db/quotaResetEvents";
 import { calculateCostDetailed } from "./costCalculator";
 import { buildErrorBody, sanitizeErrorMessage } from "@omniroute/open-sse/utils/error.ts";
 
@@ -54,10 +52,6 @@ export interface ApiKeyUsageLimitDetails extends ApiKeyUsageLimitStatus {
 
 export interface ApiKeyUsageLimitDeps {
   now?: () => number;
-  getProviderConnectionById?: (connectionId: string) => Promise<unknown>;
-  getProviderConnections?: (filter?: Record<string, unknown>) => Promise<unknown[]>;
-  getProviderLimitsCache?: (connectionId: string) => ProviderLimitsCacheEntry | null;
-  getAllProviderLimitsCache?: () => Record<string, ProviderLimitsCacheEntry>;
 }
 
 interface UsageCostRow {
@@ -75,19 +69,6 @@ interface UsageCostByDayRow extends UsageCostRow {
   usageDate: string | null;
 }
 
-interface WeeklyResetCandidate {
-  connectionId: string;
-  provider: string;
-  resetAtIso: string;
-  observedWindowStartIso: string | null;
-}
-
-interface QuotaSnapshotRow {
-  remainingPercentage: number | null;
-  nextResetAt: string | null;
-  createdAt: string | null;
-}
-
 function toNumber(value: unknown): number {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string" && value.trim()) {
@@ -95,12 +76,6 @@ function toNumber(value: unknown): number {
     return Number.isFinite(parsed) ? parsed : 0;
   }
   return 0;
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
 }
 
 function normalizeLimitUsd(value: unknown): number | null {
@@ -156,13 +131,6 @@ function formatResetIn(resetAt: string | null, now = Date.now()): string {
   return `${minutes}m`;
 }
 
-function resetDay(value: string | null): string | null {
-  if (!value) return null;
-  const parsed = Date.parse(value);
-  if (!Number.isFinite(parsed)) return null;
-  return new Date(parsed).toISOString().slice(0, 10);
-}
-
 export function getFortalezaDayStartIso(nowMs = Date.now()): string {
   const fortalezaLocal = new Date(nowMs - FORTALEZA_UTC_OFFSET_MS);
   return new Date(
@@ -182,219 +150,28 @@ export function getFortalezaDayResetIso(nowMs = Date.now()): string {
   return new Date(Date.parse(getFortalezaDayStartIso(nowMs)) + DAY_MS).toISOString();
 }
 
-export function getRollingWeekStartIso(nowMs = Date.now()): string {
-  return new Date(nowMs - WEEK_MS).toISOString();
-}
-
-function normalizeQuotaName(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
-}
-
-function normalizeProvider(value: unknown): string {
-  if (typeof value !== "string") return "";
-  const normalized = value.trim().toLowerCase();
-  if (normalized === "cc" || normalized === "claude-code") return "claude";
-  return normalized;
-}
-
-function findWeeklyQuotaResetAt(quotas: unknown, nowMs: number): string | null {
-  const quotaEntries: Array<[string, Record<string, unknown>]> = [];
-  if (Array.isArray(quotas)) {
-    for (const item of quotas) {
-      const quota = asRecord(item);
-      if (!quota) continue;
-      const name = typeof quota.name === "string" ? quota.name : "";
-      quotaEntries.push([name, quota]);
-    }
-  } else {
-    const quotaMap = asRecord(quotas);
-    if (quotaMap) {
-      for (const [name, value] of Object.entries(quotaMap)) {
-        const quota = asRecord(value);
-        if (quota) quotaEntries.push([name, quota]);
-      }
-    }
-  }
-
-  for (const [name, quota] of quotaEntries) {
-    const label = normalizeQuotaName(`${name} ${typeof quota.name === "string" ? quota.name : ""}`);
-    if (!label) continue;
-    const isWeekly = label.includes("weekly") || label.includes("7d");
-    if (!isWeekly || label.includes("sonnet")) continue;
-    const resetAt = typeof quota.resetAt === "string" && quota.resetAt.trim() ? quota.resetAt : "";
-    const resetMs = Date.parse(resetAt);
-    if (Number.isFinite(resetMs) && resetMs > nowMs) {
-      return new Date(resetMs).toISOString();
-    }
-  }
-
-  return null;
-}
-
-function connectionFromValue(value: unknown): { id: string; provider: string } | null {
-  const record = asRecord(value);
-  if (!record) return null;
-  const id = typeof record.id === "string" ? record.id : "";
-  const provider = typeof record.provider === "string" ? record.provider : "";
-  if (!id || !provider || record.isActive === false) return null;
-  return { id, provider };
-}
-
-function isWeeklyQuotaResetSnapshot(row: QuotaSnapshotRow, targetResetAtIso: string): boolean {
-  const targetDay = resetDay(targetResetAtIso);
-  if (!targetDay) return false;
-  return resetDay(row.nextResetAt) === targetDay;
-}
-
-function getObservedWeeklyWindowStartIso(
-  connectionId: string,
-  targetResetAtIso: string,
-  nowMs: number
-): string | null {
-  if (!connectionId || !targetResetAtIso) return null;
-
-  try {
-    const rows = getDbInstance()
-      .prepare(
-        `
-        SELECT
-          remaining_percentage as remainingPercentage,
-          next_reset_at as nextResetAt,
-          created_at as createdAt
-        FROM quota_snapshots
-        WHERE connection_id = @connectionId
-          AND LOWER(window_key) LIKE '%weekly%'
-          AND LOWER(window_key) NOT LIKE '%sonnet%'
-          AND created_at <= @nowIso
-        ORDER BY created_at ASC, id ASC
-      `
-      )
-      .all({ connectionId, nowIso: new Date(nowMs).toISOString() }) as QuotaSnapshotRow[];
-
-    let observedStartIso: string | null = null;
-    let previousUsedPercent: number | null = null;
-
-    for (const row of rows) {
-      if (!row.createdAt || !isWeeklyQuotaResetSnapshot(row, targetResetAtIso)) continue;
-      const remaining = toNumber(row.remainingPercentage);
-      const usedPercent = clampPercent(100 - remaining);
-
-      if (!observedStartIso) {
-        observedStartIso = row.createdAt;
-      } else if (previousUsedPercent !== null) {
-        const droppedToResetFloor = usedPercent <= 1 && previousUsedPercent > usedPercent;
-        const significantDrop = previousUsedPercent - usedPercent >= 5;
-        if (droppedToResetFloor || significantDrop) {
-          observedStartIso = row.createdAt;
-        }
-      }
-
-      previousUsedPercent = usedPercent;
-    }
-
-    return observedStartIso;
-  } catch {
-    return null;
-  }
-}
-
-// Prefer the persisted, provider-observed window start (recorded by
-// quotaResetEvents on real reset transitions); fall back to inferring it from
-// historical snapshots when no observed event is available yet.
-function getWeeklyWindowStartIso(
-  connectionId: string,
-  targetResetAtIso: string,
-  nowMs: number
-): string | null {
-  return (
-    getProviderQuotaWindowStartIso(connectionId, targetResetAtIso, nowMs) ??
-    getObservedWeeklyWindowStartIso(connectionId, targetResetAtIso, nowMs)
-  );
-}
-
-async function resolveDeps(deps: ApiKeyUsageLimitDeps): Promise<Required<ApiKeyUsageLimitDeps>> {
-  const providers =
-    deps.getProviderConnectionById && deps.getProviderConnections
-      ? null
-      : await import("@/lib/db/providers");
-  const providerLimits =
-    deps.getProviderLimitsCache && deps.getAllProviderLimitsCache
-      ? null
-      : await import("@/lib/db/providerLimits");
+export function getShanghaiWeeklyWindow(nowMs = Date.now()): {
+  windowStartIso: string;
+  resetAtIso: string;
+} {
+  // API-key USD limits are an organization policy, so their window is independent
+  // from upstream provider subscription resets: Monday 00:00 Asia/Shanghai.
+  const local = new Date(nowMs + SHANGHAI_UTC_OFFSET_MS);
+  const daysSinceMonday = (local.getUTCDay() + 6) % 7;
+  const windowStartMs =
+    Date.UTC(
+      local.getUTCFullYear(),
+      local.getUTCMonth(),
+      local.getUTCDate() - daysSinceMonday,
+      0,
+      0,
+      0,
+      0
+    ) - SHANGHAI_UTC_OFFSET_MS;
 
   return {
-    now: deps.now ?? Date.now,
-    getProviderConnectionById:
-      deps.getProviderConnectionById ?? providers!.getProviderConnectionById,
-    getProviderConnections: deps.getProviderConnections ?? providers!.getProviderConnections,
-    getProviderLimitsCache: deps.getProviderLimitsCache ?? providerLimits!.getProviderLimitsCache,
-    getAllProviderLimitsCache:
-      deps.getAllProviderLimitsCache ?? providerLimits!.getAllProviderLimitsCache,
-  };
-}
-
-async function getProviderWeeklyWindow(
-  metadata: ApiKeyUsageLimitMetadata,
-  deps: Required<ApiKeyUsageLimitDeps>,
-  nowMs: number
-): Promise<{ resetAtIso: string | null; windowStartIso: string | null }> {
-  const allowedConnections = Array.isArray(metadata.allowedConnections)
-    ? metadata.allowedConnections.filter((id) => typeof id === "string" && id.trim())
-    : [];
-
-  const resetCandidates: WeeklyResetCandidate[] = [];
-  if (allowedConnections.length > 0) {
-    for (const connectionId of allowedConnections) {
-      const connection = connectionFromValue(await deps.getProviderConnectionById(connectionId));
-      if (!connection) continue;
-      const resetAt = findWeeklyQuotaResetAt(
-        deps.getProviderLimitsCache(connection.id)?.quotas,
-        nowMs
-      );
-      if (resetAt) {
-        resetCandidates.push({
-          connectionId: connection.id,
-          provider: connection.provider,
-          resetAtIso: resetAt,
-          observedWindowStartIso: getWeeklyWindowStartIso(connection.id, resetAt, nowMs),
-        });
-      }
-    }
-  } else {
-    const caches = deps.getAllProviderLimitsCache();
-    const connections = await deps.getProviderConnections({ isActive: true });
-    for (const rawConnection of connections) {
-      const connection = connectionFromValue(rawConnection);
-      if (!connection) continue;
-      const resetAt = findWeeklyQuotaResetAt(caches[connection.id]?.quotas, nowMs);
-      if (resetAt) {
-        resetCandidates.push({
-          connectionId: connection.id,
-          provider: connection.provider,
-          resetAtIso: resetAt,
-          observedWindowStartIso: getWeeklyWindowStartIso(connection.id, resetAt, nowMs),
-        });
-      }
-    }
-  }
-
-  const preferredProvider = normalizeProvider(metadata.preferredProvider);
-  const scopedCandidates = preferredProvider
-    ? resetCandidates.filter(
-        (candidate) => normalizeProvider(candidate.provider) === preferredProvider
-      )
-    : [];
-  const candidates = scopedCandidates.length > 0 ? scopedCandidates : resetCandidates;
-  const selected =
-    candidates
-      .sort((left, right) => Date.parse(left.resetAtIso) - Date.parse(right.resetAtIso))
-      .at(0) ?? null;
-  return {
-    resetAtIso: selected?.resetAtIso ?? null,
-    windowStartIso: selected?.observedWindowStartIso ?? null,
+    windowStartIso: new Date(windowStartMs).toISOString(),
+    resetAtIso: new Date(windowStartMs + WEEK_MS).toISOString(),
   };
 }
 
@@ -404,7 +181,11 @@ interface ApiKeyUsdSpend {
   hasUnpricedUsage: boolean;
 }
 
-async function getApiKeyUsdSpendSince(apiKeyId: string, sinceIso: string): Promise<ApiKeyUsdSpend> {
+async function getApiKeyUsdSpendSince(
+  apiKeyId: string,
+  sinceIso: string,
+  untilIso: string
+): Promise<ApiKeyUsdSpend> {
   if (!apiKeyId) return { totalUsd: 0, hasUnpricedUsage: false };
   const db = getDbInstance();
   const rows = db
@@ -422,11 +203,12 @@ async function getApiKeyUsdSpendSince(apiKeyId: string, sinceIso: string): Promi
       FROM usage_history
       WHERE api_key_id = @apiKeyId
         AND timestamp >= @sinceIso
+        AND timestamp < @untilIso
         AND success = 1
       GROUP BY LOWER(provider), LOWER(model), serviceTier
     `
     )
-    .all({ apiKeyId, sinceIso }) as UsageCostRow[];
+    .all({ apiKeyId, sinceIso, untilIso }) as UsageCostRow[];
 
   let total = 0;
   let hasUnpricedUsage = false;
@@ -468,24 +250,20 @@ export async function getApiKeyUsageLimitStatus(
   metadata: ApiKeyUsageLimitMetadata,
   deps: ApiKeyUsageLimitDeps = {}
 ): Promise<ApiKeyUsageLimitStatus> {
-  const resolvedDeps = await resolveDeps(deps);
-  const now = resolvedDeps.now();
+  const now = deps.now?.() ?? Date.now();
   const dailyWindowStartIso = getFortalezaDayStartIso(now);
   const dailyResetAtIso = getFortalezaDayResetIso(now);
-  const weeklyWindow = await getProviderWeeklyWindow(metadata, resolvedDeps, now);
+  const weeklyWindow = getShanghaiWeeklyWindow(now);
   const weeklyResetAtIso = weeklyWindow.resetAtIso;
-  const weeklyWindowStartIso = weeklyWindow.windowStartIso
-    ? weeklyWindow.windowStartIso
-    : weeklyResetAtIso
-      ? new Date(Date.parse(weeklyResetAtIso) - WEEK_MS).toISOString()
-      : getRollingWeekStartIso(now);
+  const weeklyWindowStartIso = weeklyWindow.windowStartIso;
   const dailyLimitUsd = normalizeLimitUsd(metadata.dailyUsageLimitUsd);
   const weeklyLimitUsd = normalizeLimitUsd(metadata.weeklyUsageLimitUsd);
   const enabled = metadata.usageLimitEnabled === true;
+  const untilIso = new Date(now + 1).toISOString();
 
   const [dailySpend, weeklySpend] = await Promise.all([
-    getApiKeyUsdSpendSince(metadata.id, dailyWindowStartIso),
-    getApiKeyUsdSpendSince(metadata.id, weeklyWindowStartIso),
+    getApiKeyUsdSpendSince(metadata.id, dailyWindowStartIso, untilIso),
+    getApiKeyUsdSpendSince(metadata.id, weeklyWindowStartIso, untilIso),
   ]);
   const dailySpentUsd = dailySpend.totalUsd;
   const weeklySpentUsd = weeklySpend.totalUsd;
