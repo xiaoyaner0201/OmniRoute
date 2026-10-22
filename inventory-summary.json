@@ -1,0 +1,28 @@
+{
+  "source_sha": "0482755c5e4faeeb23736b9e56ec293d84809efa",
+  "source_files_parsed": 14339,
+  "production_source_files": 6200,
+  "ast_candidates": 346,
+  "supplemental_candidates": 55,
+  "unique_classified_files": 401,
+  "business_capability_groups": 29,
+  "support_boundary_groups": 4,
+  "migration_sql_files": 209,
+  "source_blob_mismatches": 0,
+  "test_baseline": {
+    "node": "v26.7.0",
+    "driver": "node:sqlite",
+    "files": 4,
+    "tests": 33,
+    "passed": 33,
+    "failed": 0,
+    "skipped": 0
+  },
+  "limitations": [
+    "Planning classification; not maintainer-approved boundaries",
+    "Candidate methods/SQL strings are not verified SQL-call or table counts",
+    "Direct ESM importer counts omit CommonJS and runtime-generated consumers",
+    "No new implementation or full CI claimed",
+    "Only node:sqlite tested; reused installed dependencies read-only"
+  ]
+}
