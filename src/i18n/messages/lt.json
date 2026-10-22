@@ -15074,5 +15074,8 @@
     "importButton": "Importuoti",
     "importFailed": "Importuoti nepavyko.",
     "importSuccess": "Importuota paskyrų: {connections}, teikėjų mazgų: {nodes}; praleista: {skipped}."
+  },
+  "logExport": {
+    "startFromCurrentPosition": "Pradėti nuo dabartinės pozicijos (praleisti esamus žurnalus)"
   }
 }

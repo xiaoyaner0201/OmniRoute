@@ -15074,5 +15074,8 @@
     "importButton": "አስገባ",
     "importFailed": "ማስገባት አልተሳካም።",
     "importSuccess": "{connections} መለያዎችና {nodes} የአቅራቢ ኖዶች ገብተዋል፤ {skipped} ተዘልለዋል።"
+  },
+  "logExport": {
+    "startFromCurrentPosition": "ከአሁኑ ቦታ ይጀምሩ (ያሉትን መዝገቦች ይዝለሉ)"
   }
 }

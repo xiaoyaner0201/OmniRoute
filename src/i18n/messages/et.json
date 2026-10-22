@@ -15074,5 +15074,8 @@
     "importButton": "Impordi",
     "importFailed": "Import ebaõnnestus.",
     "importSuccess": "Imporditi {connections} kontot ja {nodes} teenusepakkuja sõlme; vahele jäeti {skipped}."
+  },
+  "logExport": {
+    "startFromCurrentPosition": "Alusta praegusest asukohast (jäta olemasolevad logid vahele)"
   }
 }

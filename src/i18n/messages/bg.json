@@ -15074,5 +15074,8 @@
     "importButton": "Импортирай",
     "importFailed": "Импортът е неуспешен.",
     "importSuccess": "Импортирани {connections} акаунта и {nodes} възела на доставчици; пропуснати {skipped}."
+  },
+  "logExport": {
+    "startFromCurrentPosition": "Започни от текущата позиция (пропусни съществуващите журнали)"
   }
 }

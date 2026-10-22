@@ -15074,5 +15074,8 @@
     "importButton": "Importar",
     "importFailed": "Falha na importação.",
     "importSuccess": "{connections} contas e {nodes} nós de provedor importados; {skipped} ignorados."
+  },
+  "logExport": {
+    "startFromCurrentPosition": "Começar na posição atual (ignorar os logs existentes)"
   }
 }

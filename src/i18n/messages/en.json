@@ -15074,5 +15074,8 @@
     "importButton": "Import",
     "importFailed": "Import failed.",
     "importSuccess": "Imported {connections} accounts and {nodes} provider nodes; {skipped} skipped."
+  },
+  "logExport": {
+    "startFromCurrentPosition": "Start from current position (skip existing logs)"
   }
 }
