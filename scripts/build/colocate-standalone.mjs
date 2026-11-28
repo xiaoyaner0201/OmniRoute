@@ -131,6 +131,23 @@ function main() {
   );
   console.log("[colocate-standalone] ✅ call-log artifact worker bundled");
 
+  const conversationCountWorkerDest = join(STANDALONE, "src/lib/db/conversationCountWorker.js");
+  mkdirSync(dirname(conversationCountWorkerDest), { recursive: true });
+  runBuildTool(
+    "esbuild",
+    "esbuild",
+    [
+      join(ROOT, "src/lib/db/conversationCountWorker.ts"),
+      "--bundle",
+      "--platform=node",
+      "--packages=external",
+      "--format=esm",
+      `--outfile=${conversationCountWorkerDest}`,
+    ],
+    { stdio: "inherit" }
+  );
+  console.log("[colocate-standalone] ✅ conversation count worker bundled");
+
   const exportChildDest = join(STANDALONE, "src/lib/logExport/exportChild.js");
   mkdirSync(dirname(exportChildDest), { recursive: true });
   runBuildTool(

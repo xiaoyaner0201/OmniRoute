@@ -22,6 +22,7 @@
 import { v4 as uuidv4 } from "uuid";
 import { logicalCallSql } from "./logicalCallSql";
 import { getDbInstance } from "./core";
+import { MULTI_TURN_CONVERSATION_COUNT_SQL } from "./multiTurnConversationSql";
 
 export interface AgenticConversationRow {
   id: string;
@@ -437,19 +438,27 @@ export function listMultiTurnConversations(
     offset?: number;
   } = {}
 ): { rows: MultiTurnConversationRow[]; total: number } {
+  const limit = Math.max(1, Math.min(filter.limit ?? 50, 200));
+  const offset = Math.max(0, filter.offset ?? 0);
+  const total = countMultiTurnConversations();
+  const rows = listMultiTurnConversationPage({ limit, offset });
+  return { total, rows };
+}
+
+/** The list total on the calling thread: the query walks every conversation's turn nodes. */
+export function countMultiTurnConversations(): number {
+  const db = getDbInstance();
+  const total = asRecord(db.prepare(MULTI_TURN_CONVERSATION_COUNT_SQL).get()).c as number;
+  return Number(total ?? 0);
+}
+
+/** One page of listMultiTurnConversations without the total; the page query stays cheap. */
+export function listMultiTurnConversationPage(
+  filter: { limit?: number; offset?: number } = {}
+): MultiTurnConversationRow[] {
   const db = getDbInstance();
   const limit = Math.max(1, Math.min(filter.limit ?? 50, 200));
   const offset = Math.max(0, filter.offset ?? 0);
-
-  const total = asRecord(
-    db
-      .prepare(
-        `SELECT COUNT(*) as c FROM agentic_conversations ac
-         WHERE (SELECT COUNT(*) FROM conversation_turn_nodes n WHERE n.conversation_id = ac.id) >= 2`
-      )
-      .get()
-  ).c as number;
-
   const rows = db
     .prepare(
       `${MULTI_TURN_CONVERSATION_SELECT}
@@ -458,11 +467,7 @@ export function listMultiTurnConversations(
        LIMIT ? OFFSET ?`
     )
     .all(limit, offset);
-
-  return {
-    total: Number(total ?? 0),
-    rows: rows.map(toMultiTurnConversationRow),
-  };
+  return rows.map(toMultiTurnConversationRow);
 }
 
 function toMultiTurnConversationRow(value: unknown): MultiTurnConversationRow {

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireManagementAuth } from "@/lib/api/requireManagementAuth";
 import type { MultiTurnConversationRow } from "@/lib/db/agenticConversations";
-import { listMultiTurnConversations } from "@/lib/db/agenticConversations";
+import { listMultiTurnConversationsForRoute } from "@/lib/db/conversationCountOffThread";
 import { getPendingById } from "@/lib/usage/usageHistory";
 import {
   isGenuineContinuationTurn,
@@ -71,7 +71,7 @@ export async function GET(req: Request) {
     const limit = Number(searchParams.get("limit") ?? "50");
     const offset = Number(searchParams.get("offset") ?? "0");
 
-    const { rows, total } = listMultiTurnConversations({
+    const { rows, total } = await listMultiTurnConversationsForRoute({
       limit: Number.isFinite(limit) ? limit : undefined,
       offset: Number.isFinite(offset) ? offset : undefined,
     });

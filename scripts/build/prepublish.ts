@@ -317,6 +317,22 @@ runBuildTool(
   { cwd: ROOT, stdio: "inherit" }
 );
 
+const conversationCountWorkerDest = join(DIST_DIR, "src/lib/db/conversationCountWorker.js");
+mkdirSync(dirname(conversationCountWorkerDest), { recursive: true });
+runBuildTool(
+  "esbuild",
+  "esbuild",
+  [
+    "src/lib/db/conversationCountWorker.ts",
+    "--bundle",
+    "--platform=node",
+    "--packages=external",
+    "--format=esm",
+    `--outfile=${conversationCountWorkerDest}`,
+  ],
+  { cwd: ROOT, stdio: "inherit" }
+);
+
 const callLogWorkerSrc = join(ROOT, "src", "lib", "usage", "callLogArtifactWorker.ts");
 const callLogWorkerDest = join(DIST_DIR, "src", "lib", "usage", "callLogArtifactWorker.js");
 if (!existsSync(callLogWorkerSrc)) {

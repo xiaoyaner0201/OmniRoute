@@ -12,6 +12,8 @@ const nativeModuleRoots = ["bin", "scripts"].map((directory) =>
 const nativeSources = new Set(
   [
     "src/lib/usage/callLogArtifactWorker.ts",
+    "src/lib/db/conversationCountWorker.ts",
+    "src/lib/db/multiTurnConversationSql.ts",
     "src/lib/usage/callLogArtifacts.ts",
     "src/lib/dataPaths.ts",
     "src/lib/logEnv.ts",

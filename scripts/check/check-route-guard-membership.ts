@@ -250,6 +250,8 @@ export const TRANSITIVE_SPAWN_INFRA_MODULES: Record<string, string> = {
     "imports worker_threads only to polyfill markAsUncloneable; starts no worker.",
   "src/lib/usage/callLogArtifactWriter.ts":
     "worker_threads Worker running the in-repo call-log artifact writer; fixed script.",
+  "src/lib/db/conversationCountOffThread.ts":
+    "worker_threads Worker running the in-repo read-only conversation count; fixed script.",
   "open-sse/services/compression/compressionWorkerPool.ts":
     "worker_threads pool for the in-repo compression worker; fixed script.",
   "open-sse/services/compression/engines/llmlingua/worker.ts":
