@@ -165,12 +165,20 @@ async function countOffThread(config: ConversationCountOffThreadConfig): Promise
   const filePath = workerTarget();
   if (!filePath) return countMultiTurnConversations();
   if (!inflight) {
-    inflight = runner(filePath, config.timeoutMs)
-      .then((total) => {
-        cached = config.cacheMs > 0 ? { total, expiresAt: Date.now() + config.cacheMs } : null;
-        lastTotal = config.cacheMs > 0 ? total : null;
-        return total;
-      })
+    // Promise.resolve().then keeps a synchronous throw (missing worker file) on the fallback path.
+    inflight = Promise.resolve()
+      .then(() => runner(filePath, config.timeoutMs))
+      .then(
+        (total) => {
+          cached = config.cacheMs > 0 ? { total, expiresAt: Date.now() + config.cacheMs } : null;
+          lastTotal = config.cacheMs > 0 ? total : null;
+          return total;
+        },
+        (err: unknown) => {
+          lastTotal = null;
+          throw err;
+        }
+      )
       .finally(() => {
         inflight = null;
       });

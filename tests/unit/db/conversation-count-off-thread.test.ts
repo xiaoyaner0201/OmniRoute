@@ -168,6 +168,33 @@ test("flag on: a worker failure falls back to the synchronous total and is not c
   assert.equal(runs, 2);
 });
 
+test("flag on: a runner that throws before returning a promise still falls back", async () => {
+  offThread.__setConversationCountRunnerForTests(() => {
+    throw new Error("Conversation count worker is missing");
+  });
+  assert.equal(
+    (await offThread.listMultiTurnConversationsForRoute({ limit: 50 }, enabled)).total,
+    2
+  );
+});
+
+test("flag on: a failed refresh drops the stale total so the next request falls back", async () => {
+  const short = { enabled: true, cacheMs: 1, timeoutMs: 5_000 };
+  let runs = 0;
+  offThread.__setConversationCountRunnerForTests(async () => {
+    runs++;
+    if (runs === 1) return 7;
+    throw new Error("worker unavailable");
+  });
+  assert.equal((await offThread.listMultiTurnConversationsForRoute({}, short)).total, 7);
+  await new Promise((r) => setTimeout(r, 5));
+  // The refresh starts here and fails; this request still gets the previous total.
+  assert.equal((await offThread.listMultiTurnConversationsForRoute({}, short)).total, 7);
+  await new Promise((r) => setImmediate(r));
+  // The failure is not kept: the next request uses the synchronous count.
+  assert.equal((await offThread.listMultiTurnConversationsForRoute({}, short)).total, 2);
+});
+
 test("the real worker counts on its own read-only connection", async () => {
   offThread.__setConversationCountRunnerForTests(null);
   const result = await offThread.listMultiTurnConversationsForRoute(
