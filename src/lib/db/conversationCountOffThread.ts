@@ -6,9 +6,10 @@
  * conversation_turn_nodes index from disk and holds the event loop for tens of seconds, and
  * the Conversations page polls it every few seconds. With
  * OMNIROUTE_CONVERSATION_COUNT_OFF_THREAD enabled the count runs in a worker thread on its
- * own read-only connection: concurrent requests share one run (single flight), and a result
- * is reused for OMNIROUTE_CONVERSATION_COUNT_CACHE_MS. The page rows still come from the main
- * connection; that query reads only the requested page.
+ * own read-only connection: concurrent requests share one run (single flight), a result is
+ * reused for OMNIROUTE_CONVERSATION_COUNT_CACHE_MS, and once it expires the previous total is
+ * returned while one refresh runs. The page rows still come from the main connection; that
+ * query reads only the requested page.
  *
  * Off (the default) keeps the existing synchronous path. Whenever the worker cannot give an
  * answer (non better-sqlite3 driver, in-memory DB, worker failure, timeout) the request falls
@@ -28,7 +29,7 @@ import {
 } from "./agenticConversations";
 import { getDbInstance } from "./core";
 
-const DEFAULT_CACHE_MS = 30_000;
+const DEFAULT_CACHE_MS = 300_000;
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_TIMEOUT_MS = 600_000;
 const WORKER_BUSY_TIMEOUT_MS = 5_000;
@@ -142,12 +143,14 @@ function runCountInWorker(filePath: string, timeoutMs: number): Promise<number> 
 let runner: CountRunner = runCountInWorker;
 let inflight: Promise<number> | null = null;
 let cached: { total: number; expiresAt: number } | null = null;
+let lastTotal: number | null = null;
 
 /** Test seam: replace the worker runner (null restores it) and clear shared state. */
 export function __setConversationCountRunnerForTests(next: CountRunner | null): void {
   runner = next ?? runCountInWorker;
   inflight = null;
   cached = null;
+  lastTotal = null;
 }
 
 function workerTarget(): string | null {
@@ -165,11 +168,17 @@ async function countOffThread(config: ConversationCountOffThreadConfig): Promise
     inflight = runner(filePath, config.timeoutMs)
       .then((total) => {
         cached = config.cacheMs > 0 ? { total, expiresAt: Date.now() + config.cacheMs } : null;
+        lastTotal = config.cacheMs > 0 ? total : null;
         return total;
       })
       .finally(() => {
         inflight = null;
       });
+  }
+  // An expired total is still shown while one refresh runs; the count only labels the list.
+  if (lastTotal !== null) {
+    inflight.catch(() => {});
+    return lastTotal;
   }
   try {
     return await inflight;

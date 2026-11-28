@@ -126,6 +126,31 @@ test("flag on: concurrent requests share one count and a fresh result is reused"
   assert.equal(runs, 1);
 });
 
+test("flag on: an expired total is returned while one refresh runs", async () => {
+  const short = { enabled: true, cacheMs: 1, timeoutMs: 5_000 };
+  let runs = 0;
+  let release: (total: number) => void = () => {};
+  offThread.__setConversationCountRunnerForTests(() => {
+    runs++;
+    if (runs === 1) return Promise.resolve(7);
+    return new Promise<number>((resolve) => {
+      release = resolve;
+    });
+  });
+  assert.equal((await offThread.listMultiTurnConversationsForRoute({}, short)).total, 7);
+  await new Promise((r) => setTimeout(r, 5));
+  // Expired: the old total comes back at once and exactly one refresh starts.
+  assert.equal((await offThread.listMultiTurnConversationsForRoute({}, short)).total, 7);
+  assert.equal((await offThread.listMultiTurnConversationsForRoute({}, short)).total, 7);
+  assert.equal(runs, 2);
+  release(9);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(
+    (await offThread.listMultiTurnConversationsForRoute({}, { ...short, cacheMs: 60_000 })).total,
+    9
+  );
+});
+
 test("flag on: a worker failure falls back to the synchronous total and is not cached", async () => {
   let runs = 0;
   offThread.__setConversationCountRunnerForTests(async () => {
@@ -156,7 +181,7 @@ test("the real worker counts on its own read-only connection", async () => {
 test("env parsing: off unless explicitly enabled; bad numbers fall back to defaults", () => {
   assert.deepEqual(offThread.parseConversationCountOffThreadEnv({}), {
     enabled: false,
-    cacheMs: 30_000,
+    cacheMs: 300_000,
     timeoutMs: 120_000,
   });
   const on = offThread.parseConversationCountOffThreadEnv({
